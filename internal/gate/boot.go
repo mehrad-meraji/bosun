@@ -18,18 +18,44 @@ func (g *Gate) Recover(ctx context.Context) error {
 		return err
 	}
 	defer f.Close()
+	// Keep only the records whose recovery failed; remove successful ones
+	var failed []state.Pending
 	for _, p := range st.Pending {
 		msg, err := g.recoverOne(ctx, p)
 		if err != nil {
-			msg = fmt.Sprintf("%s: crash recovery failed: %v. Check it by hand with `docker ps -a`", p.Name, err)
+			msg = fmt.Sprintf("%s: crash recovery failed: %v. The old container may be stopped as %s: rename it back to %s and start it, then restart bosun-gate.", p.Name, err, p.TmpName, p.Name)
+			failed = append(failed, p)
 		}
 		st.AddEvent("recovered", p.Name, msg)
 	}
-	st.Pending = nil
+	st.Pending = failed
 	return f.Save(st)
 }
 
 func (g *Gate) recoverOne(ctx context.Context, p state.Pending) (string, error) {
+	// Check if the old container still exists
+	_, oldErr := g.D.Inspect(ctx, p.OldID)
+	if oldErr != nil && !docker.IsNotFound(oldErr) {
+		return "", oldErr
+	}
+	if docker.IsNotFound(oldErr) {
+		// Old container is gone. Check what's at p.Name now.
+		cur, err := g.D.Inspect(ctx, p.Name)
+		if err != nil && !docker.IsNotFound(err) {
+			return "", err
+		}
+		if docker.IsNotFound(err) {
+			// Neither old nor new container exists - this is a problem
+			return "", fmt.Errorf("both old container %s and current container %s are missing", p.OldID, p.Name)
+		}
+		// A container is running at p.Name; keep it and start it if stopped
+		if !cur.State.Running {
+			_ = g.D.Start(ctx, cur.ID)
+		}
+		return p.Name + ": an update was cut off; the old container was already gone, so the current one was kept", nil
+	}
+
+	// Old container exists. Check the container at p.Name
 	cur, err := g.D.Inspect(ctx, p.Name)
 	switch {
 	case err != nil && !docker.IsNotFound(err):
@@ -62,7 +88,7 @@ func (g *Gate) SpawnUpdater(ctx context.Context) error {
 	if err := g.RemoveUpdaters(ctx); err != nil {
 		return err
 	}
-	id, err := g.D.Create(ctx, UpdaterName, updaterBody(self, g.Dir))
+	id, err := g.D.Create(ctx, UpdaterName, updaterBody(self, g.RunDir))
 	if err != nil {
 		return err
 	}

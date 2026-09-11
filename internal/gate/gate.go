@@ -35,7 +35,8 @@ var nameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`)
 
 type Gate struct {
 	D      *docker.Client
-	Dir    string        // shared run folder, /run/bosun
+	Dir    string        // gate-only state folder, /var/lib/bosun; never given to the updater
+	RunDir string        // shared socket folder, /run/bosun; the only folder the updater gets
 	SelfID string        // the gate's own container ID (or its prefix); never touched
 	Poll   time.Duration // health poll interval; 0 means 1s
 }
