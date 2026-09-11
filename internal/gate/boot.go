@@ -51,12 +51,15 @@ func (g *Gate) recoverOne(ctx context.Context, st *state.State, p state.Pending)
 			// Neither old nor new container exists - this is a problem
 			return "", fmt.Errorf("both old container %s and current container %s are missing", p.OldID, p.Name)
 		}
-		// A container is running at p.Name; keep it and start it if stopped
-		msg := p.Name + ": an update was cut off; the old container was already gone, so the current one was kept"
+		// A container is running at p.Name; keep it and start it if stopped,
+		// unless its mounts hold restored backup data that must never run.
 		if !cur.State.Running {
-			return msg, g.D.Start(ctx, cur.ID)
+			if p.KeepStopped {
+				return p.Name + ": an update was cut off; the old container was already gone, and the current one is stopped", nil
+			}
+			return p.Name + ": an update was cut off; the old container was already gone, so the current one was kept", g.D.Start(ctx, cur.ID)
 		}
-		return msg, nil
+		return p.Name + ": an update was cut off; the old container was already gone, so the current one was kept", nil
 	}
 
 	// Old container exists. Check the container at p.Name
@@ -67,6 +70,9 @@ func (g *Gate) recoverOne(ctx context.Context, st *state.State, p state.Pending)
 	case err == nil && cur.ID == p.OldID:
 		// Stopped or crashed before the rename. Nothing changed but the stop
 		// and the tag, which the pull or rollback moved.
+		if p.KeepStopped {
+			return fmt.Sprintf("%s: a rollback with data was cut off; the data is from the backup, and %s is stopped. Run `bosun rollback %s --with-data` again", p.Name, p.Name, p.Name), nil
+		}
 		g.retag(ctx, old.Image, old.Config.Image)
 		return p.Name + ": an update was cut off before it changed anything; the container is running again", g.D.Start(ctx, p.OldID)
 	case err == nil && cur.State.Running && g.waitHealthy(ctx, cur.ID, timeoutOf(cur)) == nil:
@@ -87,6 +93,9 @@ func (g *Gate) recoverOne(ctx context.Context, st *state.State, p state.Pending)
 		st.Entry(p.Name).AddSkip(p.Digest)
 	}
 	g.retag(ctx, old.Image, old.Config.Image)
+	if p.KeepStopped {
+		return fmt.Sprintf("%s: a rollback with data was cut off; %s is stopped with the backup's data. Run `bosun rollback %s --with-data` again", p.Name, p.Name, p.Name), nil
+	}
 	return p.Name + ": an update was cut off; the old version is back", g.D.Start(ctx, p.OldID)
 }
 

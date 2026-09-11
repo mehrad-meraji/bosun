@@ -323,6 +323,30 @@ func TestRecoverKeepsNewThatPassesTheHealthWait(t *testing.T) {
 	}
 }
 
+// A --with-data rollback cut off with the newer version's mounts already
+// holding restored (old) data must never be started back up.
+func TestRecoverKeepStoppedNeverRestartsRestoredData(t *testing.T) {
+	f := recoverFake(false, "") // new container running at first look, stopped at the health wait
+	g := f.gate(t)
+	setEntry(t, g, "app", state.Entry{}, state.Pending{Name: "app", OldID: "old-id", TmpName: "app-bosun-x", KeepStopped: true})
+	if err := g.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	st, err := state.Read(g.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Pending) != 0 || len(st.Events) != 1 {
+		t.Fatalf("state = %+v, want nothing pending and one event", st)
+	}
+	if f.called("POST /containers/old-id/start") {
+		t.Errorf("must never start a container whose mounts hold restored backup data; calls: %v", f.calls)
+	}
+	if !strings.Contains(st.Events[0].Message, "is stopped") {
+		t.Errorf("event must say the container is stopped: %s", st.Events[0].Message)
+	}
+}
+
 // A cut-off rollback that is kept must skip the version it left, or the next
 // round would update straight back to it.
 func TestRecoverKeptRollbackSkipsTheVersionItLeft(t *testing.T) {

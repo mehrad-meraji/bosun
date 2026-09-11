@@ -148,7 +148,7 @@ func (g *Gate) Update(ctx context.Context, name, digest, auth string) (Result, e
 	}
 	// From here on, finish even if the caller hangs up. A half-done swap is worse.
 	ctx = context.WithoutCancel(ctx)
-	res, err := g.swap(ctx, f, st, c, ref, digest, c.Config.Labels[LabelBackup] == "true")
+	res, err := g.swap(ctx, f, st, c, ref, swapOpts{digest: digest, backup: c.Config.Labels[LabelBackup] == "true"})
 	if err != nil {
 		return Result{}, err
 	}
@@ -223,15 +223,17 @@ func (g *Gate) Rollback(ctx context.Context, name string, withData bool) (Result
 			return Result{}, fmt.Errorf("%s: %v. %s is stopped with incomplete data; run `bosun rollback %s --with-data` again", name, err, name, name)
 		}
 	}
-	res, err := g.swap(ctx, f, st, c, ref, "", false)
+	res, err := g.swap(ctx, f, st, c, ref, swapOpts{keepStopped: withData})
 	if err != nil {
+		if withData {
+			return Result{}, fmt.Errorf("%s is stopped with the data from the backup of %s: %w. Run `bosun rollback %s --with-data` again",
+				name, m.Time.Format("2006-01-02 15:04"), err, name)
+		}
 		return Result{}, err
 	}
 	if res.Status == StatusReverted {
 		if withData {
-			// The revert started the newer version on the old data. Stop it.
-			_ = g.D.Stop(ctx, c.ID)
-			res.Message = fmt.Sprintf("%s: the data went back to the backup from %s, but the old version did not come up healthy. %s is stopped, so the newer version does not run on old data. Check `docker logs %s`",
+			res.Message = fmt.Sprintf("%s: the data went back to the backup from %s, but the old version did not come up healthy. %s is stopped, so the newer version does not run on old data. Check `docker logs %s`. If it has `restart: always`, Docker may start it after a reboot; stop it again or remove the policy",
 				name, m.Time.Format("2006-01-02 15:04"), name, name)
 			return res, nil
 		}
@@ -252,12 +254,22 @@ func (g *Gate) Rollback(ctx context.Context, name string, withData bool) (Result
 	return res, f.Save(st)
 }
 
+// swapOpts controls a swap. digest is the version an update goes to, or ""
+// for a rollback; crash recovery reads it. backup copies the old container's
+// mounts while it is stopped, before anything else changes. keepStopped
+// means the old container's mounts already hold restored backup data (a
+// --with-data rollback), so it must never run again; every failure path
+// leaves it stopped instead of starting it back up.
+type swapOpts struct {
+	digest      string
+	backup      bool
+	keepStopped bool
+}
+
 // swap replaces old with a new container running ref, then waits for it to
 // be healthy. If anything fails after the old one stops, it puts the old one
-// back and returns StatusReverted. digest is the version an update goes to,
-// or "" for a rollback; crash recovery reads it. withBackup copies the old
-// container's mounts while it is stopped, before anything else changes.
-func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *docker.Container, ref, digest string, withBackup bool) (Result, error) {
+// back and returns StatusReverted.
+func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *docker.Container, ref string, opts swapOpts) (Result, error) {
 	name := strings.TrimPrefix(old.Name, "/")
 	img, err := g.D.InspectImage(ctx, old.Image)
 	if err != nil {
@@ -268,7 +280,7 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 		return Result{}, fmt.Errorf("%s: build the new container: %w", name, err)
 	}
 
-	p := state.Pending{Name: name, OldID: old.ID, TmpName: name + "-bosun-" + randHex(), Digest: digest}
+	p := state.Pending{Name: name, OldID: old.ID, TmpName: name + "-bosun-" + randHex(), Digest: opts.digest, KeepStopped: opts.keepStopped}
 	st.Pending = append(st.Pending, p)
 	if err := f.Save(st); err != nil {
 		return Result{}, err
@@ -290,7 +302,7 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 	}
 	var took time.Duration
 	var size int64
-	if withBackup {
+	if opts.backup {
 		b0 := time.Now()
 		m, err := g.takeBackup(ctx, old)
 		if err != nil {
@@ -302,6 +314,9 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 		took, size = time.Since(b0), m.Bytes()
 	}
 	if err := g.D.Rename(ctx, old.ID, p.TmpName); err != nil {
+		if opts.keepStopped {
+			return Result{}, fmt.Errorf("%s: rename: %v. %s is stopped with the data from the backup; run `bosun rollback %s --with-data` again", name, err, name, name)
+		}
 		if serr := g.D.Start(ctx, old.ID); serr != nil {
 			return Result{}, fmt.Errorf("%s: rename: %v, and restarting it failed: %v. %s is stopped. Start it with: docker start %s", name, err, serr, name, name)
 		}
@@ -316,9 +331,12 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 		err = g.waitHealthy(ctx, newID, timeoutOf(old))
 	}
 	if err != nil {
-		if renamed, rerr := g.revert(ctx, old.ID, newID, name); rerr != nil {
+		if renamed, rerr := g.revert(ctx, old.ID, newID, name, !opts.keepStopped); rerr != nil {
 			// revert failed; keep Pending in state so Recover can fix it on next gate start
 			keepPending = true
+			if opts.keepStopped {
+				return Result{}, fmt.Errorf("%s: new version failed (%v) and putting the old container back failed: %w. The old container is stopped as %s; do not start it on this data. Restart bosun-gate to recover, or run `bosun rollback %s --with-data` again", name, err, rerr, p.TmpName, name)
+			}
 			if renamed {
 				return Result{}, fmt.Errorf("%s: new version failed (%v) and starting the old one failed: %w. %s is stopped; start it with: docker start %s", name, err, rerr, name, name)
 			}
@@ -331,7 +349,7 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 		log.Printf("%s: remove old container %s: %v", name, p.TmpName, err)
 	}
 	msg := fmt.Sprintf("%s: now running %s (down %s)", name, ref, down.Round(100*time.Millisecond))
-	if withBackup {
+	if opts.backup {
 		msg = fmt.Sprintf("%s: now running %s (down %s, backup %s, %s)", name, ref,
 			down.Round(100*time.Millisecond), took.Round(100*time.Millisecond), backup.FormatSize(size))
 	}
@@ -339,8 +357,10 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 }
 
 // revert removes the new container and puts the old one back. renamed says
-// the old one already has its name again, so only its start failed.
-func (g *Gate) revert(ctx context.Context, oldID, newID, name string) (renamed bool, err error) {
+// the old one already has its name again, so only its start failed. start
+// is false when the old container's mounts hold restored backup data; it
+// must be put back under its name but never started.
+func (g *Gate) revert(ctx context.Context, oldID, newID, name string, start bool) (renamed bool, err error) {
 	if newID != "" {
 		if err := g.D.Remove(ctx, newID, true); err != nil && !docker.IsNotFound(err) {
 			return false, err
@@ -348,6 +368,9 @@ func (g *Gate) revert(ctx context.Context, oldID, newID, name string) (renamed b
 	}
 	if err := g.D.Rename(ctx, oldID, name); err != nil {
 		return false, err
+	}
+	if !start {
+		return true, nil
 	}
 	return true, g.D.Start(ctx, oldID)
 }

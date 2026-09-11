@@ -32,10 +32,11 @@ type Entry struct {
 
 // Pending is a swap in progress. If the gate dies mid-swap, Recover uses it.
 type Pending struct {
-	Name    string `json:"name"`
-	OldID   string `json:"old_id"`
-	TmpName string `json:"tmp_name"`
-	Digest  string `json:"digest,omitempty"` // the version an update goes to; empty for a rollback
+	Name        string `json:"name"`
+	OldID       string `json:"old_id"`
+	TmpName     string `json:"tmp_name"`
+	Digest      string `json:"digest,omitempty"`       // the version an update goes to; empty for a rollback
+	KeepStopped bool   `json:"keep_stopped,omitempty"` // a --with-data rollback restored the old container's mounts; it must never run again
 }
 
 // Event waits here until the updater collects it and sends it as a note.

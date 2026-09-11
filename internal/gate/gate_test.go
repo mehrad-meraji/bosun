@@ -180,6 +180,7 @@ type dockerFake struct {
 	containers map[string]string
 	images     map[string]string
 	fail       map[string]bool
+	replies    map[string]string // "METHOD path" (no query) -> fixed 200 body
 	calls      []string
 	onStop     func()
 }
@@ -215,10 +216,15 @@ func (f *dockerFake) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.calls = append(f.calls, strings.TrimSuffix(call+"?"+q, "?"))
 	fail := f.fail[call]
+	reply, hasReply := f.replies[call]
 	f.mu.Unlock()
 	if fail {
 		w.WriteHeader(http.StatusInternalServerError)
 		io.WriteString(w, `{"message":"boom"}`)
+		return
+	}
+	if hasReply {
+		io.WriteString(w, reply)
 		return
 	}
 	if strings.HasSuffix(path, "/stop") && f.onStop != nil {
