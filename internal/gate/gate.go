@@ -153,6 +153,7 @@ func (g *Gate) Update(ctx context.Context, name, digest, auth string) (Result, e
 	ctx = context.WithoutCancel(ctx)
 	res, err := g.swap(ctx, f, st, c, ref, swapOpts{digest: digest, backup: c.Config.Labels[LabelBackup] == "true"})
 	if err != nil {
+		g.retag(ctx, c.Image, ref) // the pull moved the tag; point it back at what runs
 		return Result{}, err
 	}
 	if res.Status == StatusReverted {

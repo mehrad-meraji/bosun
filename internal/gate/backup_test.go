@@ -178,6 +178,9 @@ func TestUpdateBackupFailureStopsTheUpdate(t *testing.T) {
 	if st, _ := state.Read(g.Dir); len(st.Pending) != 0 {
 		t.Errorf("pending record left: %+v", st.Pending)
 	}
+	if !f.called(retagOld) {
+		t.Errorf("tag not put back on the old image; calls: %v", f.calls)
+	}
 }
 
 func TestNoBackupWithoutLabel(t *testing.T) {
