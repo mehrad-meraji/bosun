@@ -17,6 +17,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - bosun-run:/run/bosun
       - bosun-state:/var/lib/bosun
+      - bosun-backups:/var/lib/bosun-backups
       # Optional. Everything under /etc/bosun is passed to the updater read-only.
       # - ./notify.txt:/etc/bosun/notify.txt:ro
       # - ./registry-auth.json:/etc/bosun/docker/config.json:ro
@@ -24,3 +25,4 @@ services:
 volumes:
   bosun-run:
   bosun-state:
+  bosun-backups:
