@@ -1,0 +1,25 @@
+# Bosun: one service. The gate starts its own updater container.
+# Set DOCKER_GID first (see README).
+services:
+  bosun:
+    build: .
+    container_name: bosun-gate
+    restart: unless-stopped
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    group_add: ["${DOCKER_GID:?set DOCKER_GID, see README}"]
+    environment:
+      BOSUN_SCHEDULE: "0 4 * * *"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - bosun-run:/run/bosun
+      - bosun-state:/var/lib/bosun
+      # Optional. Everything under /etc/bosun is passed to the updater read-only.
+      # - ./notify.txt:/etc/bosun/notify.txt:ro
+      # - ./registry-auth.json:/etc/bosun/docker/config.json:ro
+
+volumes:
+  bosun-run:
+  bosun-state:
