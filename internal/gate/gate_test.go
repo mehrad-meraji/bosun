@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,13 +93,13 @@ func TestWatchedBadName(t *testing.T) {
 	// Test that bad names are refused without touching Docker (D is nil)
 	g := &Gate{D: nil, Dir: ""}
 	for _, badName := range []string{
-		"",                 // empty
-		"_web",             // starts with underscore
-		"-web",             // starts with dash
-		".web",             // starts with dot
-		"web/name",         // contains slash
-		"web?name",         // contains question mark
-		"a" + string(make([]byte, 200)), // too long
+		"",                      // empty
+		"_web",                  // starts with underscore
+		"-web",                  // starts with dash
+		".web",                  // starts with dot
+		"web/name",              // contains slash
+		"web?name",              // contains question mark
+		strings.Repeat("a", 129), // too long
 	} {
 		_, _, err := g.watched(context.Background(), badName)
 		if err == nil || !isRefused(err) {
@@ -109,11 +110,18 @@ func TestWatchedBadName(t *testing.T) {
 
 func TestWatchedNameIDMismatch(t *testing.T) {
 	// Test that using a container ID when a name is required is refused
-	c := fakeGate(t, func(w http.ResponseWriter, r *http.Request) {
+	g := fakeGate(t, func(w http.ResponseWriter, r *http.Request) {
 		// The request might be for abc123 (ID prefix used as name)
 		if r.URL.Path == "/v1.44/containers/abc123/json" {
-			// Return a container with a different name
-			resp := docker.Container{ID: "abc123def456", Name: "/web"}
+			// Return a container with a different name and required labels
+			resp := docker.Container{
+				ID:   "abc123def456",
+				Name: "/web",
+				Config: docker.ContainerConfig{
+					Image: "nginx:1.27",
+					Labels: map[string]string{LabelEnable: "true"},
+				},
+			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 			return
@@ -122,9 +130,13 @@ func TestWatchedNameIDMismatch(t *testing.T) {
 	})
 
 	// Using the ID prefix should be refused (doesn't match the actual name "web")
-	_, _, err := c.watched(context.Background(), "abc123")
+	_, _, err := g.watched(context.Background(), "abc123")
 	if err == nil || !isRefused(err) {
 		t.Errorf("watched(id prefix) should refuse, got %v", err)
+	}
+	// Verify the error is specifically about the name/ID mismatch, not the label
+	if !strings.Contains(err.Error(), "not a container name") {
+		t.Errorf("expected 'not a container name' in error, got %v", err)
 	}
 }
 

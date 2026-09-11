@@ -208,6 +208,16 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 		return Result{}, err
 	}
 
+	keepPending := false
+	defer func() {
+		if !keepPending {
+			st.Pending = slices.DeleteFunc(st.Pending, func(q state.Pending) bool { return q == p })
+			if err := f.Save(st); err != nil {
+				log.Printf("save state: %v", err)
+			}
+		}
+	}()
+
 	t0 := time.Now()
 	if err := g.D.Stop(ctx, old.ID); err != nil {
 		return Result{}, fmt.Errorf("%s: stop: %w", name, err)
@@ -227,23 +237,14 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 	if err != nil {
 		if rerr := g.revert(ctx, old.ID, newID, name); rerr != nil {
 			// revert failed; keep Pending in state so Recover can fix it on next gate start
+			keepPending = true
 			return Result{}, fmt.Errorf("%s: new version failed (%v) and putting the old one back failed: %w. The old container is stopped as %s; restart bosun-gate to recover it, or rename it back to %s and start it", name, err, rerr, p.TmpName, name)
-		}
-		// revert succeeded; remove Pending
-		st.Pending = slices.DeleteFunc(st.Pending, func(q state.Pending) bool { return q == p })
-		if err := f.Save(st); err != nil {
-			log.Printf("save state: %v", err)
 		}
 		return Result{Status: StatusReverted, Downtime: time.Since(t0),
 			Message: fmt.Sprintf("%s: new version failed (%v); the old version is back", name, err)}, nil
 	}
 	if err := g.D.Remove(ctx, old.ID, true); err != nil {
 		log.Printf("%s: remove old container %s: %v", name, p.TmpName, err)
-	}
-	// successful swap; remove Pending
-	st.Pending = slices.DeleteFunc(st.Pending, func(q state.Pending) bool { return q == p })
-	if err := f.Save(st); err != nil {
-		log.Printf("save state: %v", err)
 	}
 	return Result{Status: StatusDone, Downtime: down,
 		Message: fmt.Sprintf("%s: now running %s (down %s)", name, ref, down.Round(100*time.Millisecond))}, nil
