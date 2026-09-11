@@ -28,6 +28,8 @@ type Entry struct {
 	Downtime  time.Duration `json:"downtime,omitempty"`
 	Skip      []string      `json:"skip,omitempty"`       // digests never to update to
 	WarnedBig bool          `json:"warned_big,omitempty"` // the big-backup warning went out once
+	// DataRestored: volumes hold backup data; the newer version must not run on them.
+	DataRestored bool `json:"data_restored,omitempty"`
 }
 
 // Pending is a swap in progress. If the gate dies mid-swap, Recover uses it.

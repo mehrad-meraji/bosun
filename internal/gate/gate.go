@@ -130,6 +130,9 @@ func (g *Gate) Update(ctx context.Context, name, digest, auth string) (Result, e
 	}
 	defer f.Close()
 	e := st.Entry(name)
+	if e.DataRestored {
+		return Result{}, refuse("%s holds data restored from a backup; finish with `bosun rollback %s --with-data`", name, name)
+	}
 	if slices.Contains(e.Skip, digest) {
 		return Result{}, refuse("%s: %s is on the skip list", name, digest)
 	}
@@ -182,6 +185,12 @@ func (g *Gate) Rollback(ctx context.Context, name string, withData bool) (Result
 	if e.Prev == "" {
 		return Result{}, fmt.Errorf("no old version kept for %s. Run `bosun rollback ls` to see what you can roll back", name)
 	}
+	// An earlier --with-data try already began the restore, so the volumes
+	// hold backup data. Only another --with-data try may go on from here.
+	wasRestored := e.DataRestored
+	if wasRestored && !withData {
+		return Result{}, refuse("%s holds data restored from a backup; run `bosun rollback %s --with-data` again", name, name)
+	}
 	c, ref, err := g.watched(ctx, name)
 	if err != nil {
 		return Result{}, err
@@ -205,10 +214,10 @@ func (g *Gate) Rollback(ctx context.Context, name string, withData bool) (Result
 	// Unless the rollback works, point the tag back at the current image.
 	// Once the restore has begun, the volumes match the old image instead,
 	// so the tag must stay there — except when the restore helper refused
-	// and changed nothing, in which case the current version keeps running
-	// and the tag must go back to it, as usual.
+	// and changed nothing on a first try, in which case the current version
+	// keeps running and the tag must go back to it, as usual.
 	ok := false
-	restored := false
+	restored := wasRestored
 	defer func() {
 		if !ok && !restored {
 			g.retag(ctx, c.Image, ref)
@@ -218,10 +227,29 @@ func (g *Gate) Rollback(ctx context.Context, name string, withData bool) (Result
 		if err := g.D.Stop(ctx, c.ID); err != nil {
 			return Result{}, fmt.Errorf("%s: stop: %w", name, err)
 		}
+		// Remember the restore before it begins, so a retry never starts
+		// the newer version on this data.
+		e.DataRestored = true
+		if err := f.Save(st); err != nil {
+			e.DataRestored = wasRestored
+			if !wasRestored {
+				if serr := g.D.Start(ctx, c.ID); serr != nil {
+					return Result{}, fmt.Errorf("%s: save state: %v, so no restore. Starting it again failed: %v. Start it with: docker start %s", name, err, serr, name)
+				}
+			}
+			return Result{}, fmt.Errorf("%s: save state: %w, so no restore. Check the state folder %s, then try again", name, err, g.Dir)
+		}
 		restored = true
 		if err := g.restore(ctx, c, m); err != nil {
 			if errors.Is(err, errUntouched) {
+				if wasRestored {
+					return Result{}, fmt.Errorf("%s is stopped with data from the backup; nothing changed in this try. %v. Run `bosun rollback %s --with-data` again", name, err, name)
+				}
 				restored = false // nothing changed; the tag must go back to the current image
+				e.DataRestored = false
+				if serr := f.Save(st); serr != nil {
+					log.Printf("%s: save state: %v", name, serr)
+				}
 				if serr := g.D.Start(ctx, c.ID); serr != nil {
 					return Result{}, fmt.Errorf("%s: %v. Starting it again failed: %v. Start it with: docker start %s", name, err, serr, name)
 				}
@@ -252,7 +280,7 @@ func (g *Gate) Rollback(ctx context.Context, name string, withData bool) (Result
 		e.AddSkip(d)
 	}
 	_ = g.D.RemoveImage(ctx, e.Prev)
-	e.Prev, e.UpdatedAt = "", time.Now().UTC()
+	e.Prev, e.UpdatedAt, e.DataRestored = "", time.Now().UTC(), false
 	res.Message = fmt.Sprintf("%s: rolled back (down %s). The newer version is on the skip list; `bosun skip clear %s` allows it again",
 		name, res.Downtime.Round(100*time.Millisecond), name)
 	if withData {

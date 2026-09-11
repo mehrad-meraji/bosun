@@ -53,8 +53,8 @@ func TestRestoreBodyIsLockedDown(t *testing.T) {
 func TestRestoreBodyRefusesBadInput(t *testing.T) {
 	c := &docker.Container{Mounts: []docker.Mount{{Type: "volume", Name: "appdata", Destination: "/data", RW: true}}}
 	for _, m := range []*backup.Manifest{
-		{Mounts: []backup.Mount{{Dest: "/gone", File: "0.tar"}}},       // mount no longer there
-		{Mounts: []backup.Mount{{Dest: "/data", File: "../x.tar"}}},    // odd file name
+		{Mounts: []backup.Mount{{Dest: "/gone", File: "0.tar"}}},      // mount no longer there
+		{Mounts: []backup.Mount{{Dest: "/data", File: "../x.tar"}}},   // odd file name
 		{Mounts: []backup.Mount{{Dest: "/data", File: "0.tar:/etc"}}}, // bind injection
 	} {
 		if _, err := restoreBody("img", "src", "app", m, c); err == nil {
@@ -125,6 +125,9 @@ func TestRollbackWithData(t *testing.T) {
 		if !f.calledAfter("POST /containers/new-id/wait", retagOld) {
 			t.Errorf("nothing changed, so the tag must go back to the current image; calls: %v", f.calls)
 		}
+		if st, _ := state.Read(g.Dir); st.Entry("app").DataRestored {
+			t.Error("nothing changed, so the data must not be marked restored")
+		}
 	})
 
 	t.Run("helper fails (exit 1): incomplete data, nothing restarted", func(t *testing.T) {
@@ -139,6 +142,9 @@ func TestRollbackWithData(t *testing.T) {
 		}
 		if f.calledAfter("POST /containers/new-id/wait", retagOld) {
 			t.Errorf("data was restored, so the tag must stay on the old image; calls: %v", f.calls)
+		}
+		if st, _ := state.Read(g.Dir); !st.Entry("app").DataRestored {
+			t.Error("the restore began, so the data must be marked restored")
 		}
 	})
 
@@ -181,6 +187,72 @@ func TestRollbackWithData(t *testing.T) {
 			t.Fatalf("Rollback = %+v %v, want done with the data note; calls: %v", res, err, f.calls)
 		}
 	})
+}
+
+// A retry after a --with-data try that began the restore must never start
+// the newer version on that data, nor point the tag back at it.
+func TestRollbackRetryAfterDataRestored(t *testing.T) {
+	restoredFake := func(t *testing.T) (*dockerFake, *Gate) {
+		f, g := rollbackWithDataFake(t, true)
+		setEntry(t, g, "app", state.Entry{Prev: "bosun/prev/app:abc", DataRestored: true})
+		return f, g
+	}
+
+	t.Run("without --with-data: refused, nothing changed", func(t *testing.T) {
+		f, g := restoredFake(t)
+		_, err := g.Rollback(context.Background(), "app", false)
+		if !isRefused(err) || !strings.Contains(err.Error(), "rollback app --with-data` again") {
+			t.Fatalf("want a refusal that says to use --with-data, got %v", err)
+		}
+		for _, c := range f.calls {
+			if strings.HasPrefix(c, "POST") {
+				t.Fatalf("changed something before refusing: %v", f.calls)
+			}
+		}
+	})
+
+	t.Run("helper cannot start: stays stopped, tag stays", func(t *testing.T) {
+		f, g := restoredFake(t)
+		f.fail["POST /containers/create"] = true
+		_, err := g.Rollback(context.Background(), "app", true)
+		if err == nil || !strings.Contains(err.Error(), "nothing changed in this try") || !strings.Contains(err.Error(), "--with-data` again") {
+			t.Fatalf("want a stopped-with-backup-data message, got %v", err)
+		}
+		if f.called("POST /containers/old-id/start") {
+			t.Errorf("started the newer version on restored data; calls: %v", f.calls)
+		}
+		if f.called(retagOld) {
+			t.Errorf("the tag must stay on the old image; calls: %v", f.calls)
+		}
+		if st, _ := state.Read(g.Dir); !st.Entry("app").DataRestored {
+			t.Error("the data must stay marked restored")
+		}
+	})
+
+	t.Run("works: mark cleared", func(t *testing.T) {
+		f, g := restoredFake(t)
+		f.replies["POST /containers/new-id/wait"] = `{"StatusCode":0}`
+		res, err := g.Rollback(context.Background(), "app", true)
+		if err != nil || res.Status != StatusDone {
+			t.Fatalf("Rollback = %+v %v, want done", res, err)
+		}
+		if st, _ := state.Read(g.Dir); st.Entry("app").DataRestored {
+			t.Error("the mark must be cleared after a rollback that works")
+		}
+	})
+}
+
+func TestUpdateRefusesRestoredData(t *testing.T) {
+	f := swapFake(true)
+	g := f.gate(t)
+	setEntry(t, g, "app", state.Entry{Prev: "bosun/prev/app:abc", DataRestored: true})
+	_, err := g.Update(context.Background(), "app", "sha256:d2", "")
+	if !isRefused(err) || !strings.Contains(err.Error(), "rollback app --with-data") {
+		t.Fatalf("want a refusal, got %v", err)
+	}
+	if f.called("POST /images/create") {
+		t.Error("pulled for a container on restored data")
+	}
 }
 
 func TestRollbackWithDataRefusesBeforeChangingAnything(t *testing.T) {
