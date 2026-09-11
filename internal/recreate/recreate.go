@@ -113,7 +113,9 @@ func userValue(key string, v, img json.RawMessage, id string) (json.RawMessage, 
 
 // withAnonVolumes adds the old container's anonymous volumes (from the image's
 // VOLUME lines) to HostConfig.Mounts by name, so their data carries over.
-// Named volumes and binds are already in HostConfig.
+// A volume in HostConfig.Mounts with no Source (--mount type=volume,dst=/data)
+// is anonymous too; it gets the old volume's name. Named volumes and binds are
+// already in HostConfig.
 func withAnonVolumes(hc map[string]json.RawMessage, mounts []mount) (map[string]json.RawMessage, error) {
 	covered := map[string]bool{}
 	var binds []string
@@ -129,9 +131,20 @@ func withAnonVolumes(hc map[string]json.RawMessage, mounts []mount) (map[string]
 	if err := unmarshalOpt(hc["Mounts"], &ms); err != nil {
 		return nil, err
 	}
+	changed := false
 	for _, m := range ms {
-		if t, ok := m["Target"].(string); ok {
-			covered[t] = true
+		t, ok := m["Target"].(string)
+		if !ok {
+			continue
+		}
+		covered[t] = true
+		if src, _ := m["Source"].(string); m["Type"] == "volume" && src == "" {
+			for _, o := range mounts {
+				if o.Type == "volume" && o.Name != "" && o.Destination == t {
+					m["Source"] = o.Name
+					changed = true
+				}
+			}
 		}
 	}
 	n := len(ms)
@@ -140,7 +153,7 @@ func withAnonVolumes(hc map[string]json.RawMessage, mounts []mount) (map[string]
 			ms = append(ms, map[string]any{"Type": "volume", "Source": m.Name, "Target": m.Destination})
 		}
 	}
-	if len(ms) == n {
+	if len(ms) == n && !changed {
 		return hc, nil
 	}
 	b, err := json.Marshal(ms)

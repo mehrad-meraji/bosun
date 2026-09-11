@@ -43,13 +43,9 @@ var buildTagSeq atomic.Int64
 // push builds dockerfile, pushes it as repo:latest, drops the local tags so
 // the gate must really pull, and returns the registry digest.
 //
-// It builds under a unique local tag rather than building "-t repo:latest"
-// directly: on this Docker (OrbStack, containerd image store), building an
-// image straight onto a tag that a running container's (now-untagged) image
-// still occupies garbage-collects that old image out from under the
-// container, even though it is in use. Building under a scratch tag first
-// and only then retagging it to repo:latest avoids that GC entirely; see
-// task-10-report.md for the reproduction.
+// It builds under a unique tag and then retags: on OrbStack (containerd image
+// store), `docker build -t repo:latest` onto a tag that a running container's
+// image just lost garbage-collects that in-use image.
 func push(t *testing.T, dockerfile string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -102,9 +98,10 @@ func setup(t *testing.T) (*gate.Gate, string) {
 	return &gate.Gate{D: docker.New(sockPath), Dir: t.TempDir(), Poll: 200 * time.Millisecond}, name
 }
 
-func runApp(t *testing.T, name string) {
-	sh(t, "docker", "run", "-d", "--name", name,
-		"--label", "bosun.enable=true", "--label", "bosun.health-timeout=3s", repo+":latest")
+func runApp(t *testing.T, name string, extra ...string) {
+	args := []string{"run", "-d", "--name", name, "--label", "bosun.enable=true", "--label", "bosun.health-timeout=3s"}
+	args = append(append(args, extra...), repo+":latest")
+	sh(t, "docker", args...)
 }
 
 func version(t *testing.T, name string) string {
@@ -160,6 +157,41 @@ func TestNewImageCmdIsUsed(t *testing.T) {
 	}
 	if cmd := sh(t, "docker", "inspect", "-f", "{{json .Config.Cmd}}", name); cmd != `["sleep","7200"]` {
 		t.Fatalf("Cmd = %s, want the new image's CMD", cmd)
+	}
+}
+
+func TestVolumesAndNetworkSurvive(t *testing.T) {
+	g, name := setup(t)
+	suffix := strings.TrimPrefix(name, "bosun-it-")
+	vol, net := "bosun-it-named-"+suffix, "bosun-it-net-"+suffix
+	anon := ""
+	t.Cleanup(func() {
+		// Cleanups run last-first, so remove the container here before its volumes and network.
+		exec.Command("docker", "rm", "-f", name).Run()
+		exec.Command("docker", "volume", "rm", vol).Run()
+		if anon != "" {
+			exec.Command("docker", "volume", "rm", anon).Run()
+		}
+		exec.Command("docker", "network", "rm", net).Run()
+	})
+	sh(t, "docker", "network", "create", net)
+	push(t, v1)
+	runApp(t, name, "--mount", "type=volume,dst=/anon", "-v", vol+":/named", "--network", net, "--network-alias", "web")
+	anon = sh(t, "docker", "inspect", "-f", `{{range .Mounts}}{{if eq .Destination "/anon"}}{{.Name}}{{end}}{{end}}`, name)
+	sh(t, "docker", "exec", name, "sh", "-c", "echo a > /anon/f && echo n > /named/f")
+
+	d := push(t, v2)
+	if res, err := g.Update(context.Background(), name, d, ""); err != nil || res.Status != gate.StatusDone {
+		t.Fatalf("update: %+v %v", res, err)
+	}
+	if v := version(t, name); v != "v2" {
+		t.Fatalf("running %s, want v2", v)
+	}
+	if got := sh(t, "docker", "exec", name, "cat", "/anon/f", "/named/f"); got != "a\nn" {
+		t.Fatalf("volume data after update = %q, want both files", got)
+	}
+	if nets := sh(t, "docker", "inspect", "-f", "{{json .NetworkSettings.Networks}}", name); !strings.Contains(nets, `"web"`) {
+		t.Fatalf("network alias web lost: %s", nets)
 	}
 }
 

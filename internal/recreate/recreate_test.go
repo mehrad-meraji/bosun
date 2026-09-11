@@ -118,6 +118,17 @@ func TestBuildNamedVolumesAreNotAddedTwice(t *testing.T) {
 	}
 }
 
+// --mount type=volume,dst=/data has no Source. Without the old name, Docker
+// would make a fresh empty volume.
+func TestBuildNamesAnonymousMountVolumes(t *testing.T) {
+	old := `{"HostConfig":{"Mounts":[{"Type":"volume","Target":"/data"}]},"Mounts":[{"Type":"volume","Name":"9f8e7d","Destination":"/data"}]}`
+	hc := build(t, old)["HostConfig"].(map[string]any)
+	want := []any{map[string]any{"Type": "volume", "Source": "9f8e7d", "Target": "/data"}}
+	if !reflect.DeepEqual(hc["Mounts"], want) {
+		t.Errorf("Mounts = %v, want %v", hc["Mounts"], want)
+	}
+}
+
 func TestBuildNetworks(t *testing.T) {
 	m := build(t, oldJSON)
 	eps := m["NetworkingConfig"].(map[string]any)["EndpointsConfig"].(map[string]any)
