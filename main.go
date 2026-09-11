@@ -91,7 +91,8 @@ func newGate() *gate.Gate {
 }
 
 // checkSettings refuses settings that would hand gate-only folders to the
-// updater, which gets RunDir and /etc/bosun.
+// updater, which gets RunDir and /etc/bosun, or that mix the state, backup
+// and socket folders.
 func checkSettings() error {
 	if _, err := backup.ParseSize(warnSize); err != nil {
 		return fmt.Errorf("BOSUN_BACKUP_WARN_SIZE: %w", err)
@@ -102,6 +103,12 @@ func checkSettings() error {
 				return fmt.Errorf("%s (%s) is inside %s, which the updater can read; pick a folder outside it", d.name, d.path, shared)
 			}
 		}
+		if inside(runDir, d.path) {
+			return fmt.Errorf("BOSUN_RUN_DIR (%s) is inside %s (%s), which only the gate may see; pick separate folders", runDir, d.name, d.path)
+		}
+	}
+	if inside(stateDir, backupDir) || inside(backupDir, stateDir) {
+		return fmt.Errorf("BOSUN_STATE_DIR (%s) and BOSUN_BACKUP_DIR (%s) overlap; pick two separate folders", stateDir, backupDir)
 	}
 	return nil
 }

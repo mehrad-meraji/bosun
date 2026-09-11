@@ -56,8 +56,32 @@ func TestInside(t *testing.T) {
 	}
 }
 
+func TestCheckSettings(t *testing.T) {
+	s, b, r := stateDir, backupDir, runDir
+	t.Cleanup(func() { stateDir, backupDir, runDir = s, b, r })
+	for _, tc := range []struct {
+		state, backup, run string
+		ok                 bool
+	}{
+		{"/var/lib/bosun", "/var/lib/bosun-backups", "/run/bosun", true},
+		{"/var/lib/bosun", "/var/lib/bosun", "/run/bosun", false},                         // same folder
+		{"/var/lib/b/state", "/var/lib/b", "/run/bosun", false},                           // state inside backup
+		{"/var/lib/b", "/var/lib/b/backups", "/run/bosun", false},                         // backup inside state
+		{"/var/lib/bosun", "/var/lib/bosun-backups", "/var/lib/bosun/run", false},         // run inside state
+		{"/var/lib/bosun", "/var/lib/bosun-backups", "/var/lib/bosun-backups/run", false}, // run inside backup
+		{"/run/bosun/state", "/var/lib/bosun-backups", "/run/bosun", false},               // state inside run
+	} {
+		stateDir, backupDir, runDir = tc.state, tc.backup, tc.run
+		if err := checkSettings(); (err == nil) != tc.ok {
+			t.Errorf("checkSettings(%+v) = %v, want ok=%v", tc, err, tc.ok)
+		}
+	}
+}
+
 func TestBackupCol(t *testing.T) {
 	dir := t.TempDir()
+	b := backupDir
+	t.Cleanup(func() { backupDir = b })
 	backupDir = dir
 	if got := backupCol(gate.Watched{Name: "web"}); got != "off" {
 		t.Errorf("no label: %q", got)
