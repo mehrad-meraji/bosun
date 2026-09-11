@@ -104,7 +104,7 @@ func (g *Gate) helper(ctx context.Context) (image, src string, err error) {
 		image = self.Image
 	}
 	for _, m := range self.Mounts {
-		if src == "" && m.Destination == g.BackupDir {
+		if src == "" && filepath.Clean(m.Destination) == filepath.Clean(g.BackupDir) {
 			src = m.Source
 			if m.Type == "volume" {
 				src = m.Name

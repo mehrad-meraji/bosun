@@ -63,6 +63,35 @@ func TestRestoreBodyRefusesBadInput(t *testing.T) {
 	}
 }
 
+// helper finds the gate's own image and its backup mount from Docker, as in
+// production, where HelperImage and BackupSrc are empty.
+func TestHelperFindsOwnImageAndBackupMount(t *testing.T) {
+	for _, tc := range []struct {
+		name, mounts, image, src, errText string
+	}{
+		{"volume", `[{"Type":"volume","Name":"bosun-backups","Source":"/var/lib/docker/volumes/bosun-backups/_data","Destination":"/var/lib/bosun-backups"}]`, "sha256:bosun", "bosun-backups", ""},
+		{"bind, trailing slash", `[{"Type":"bind","Source":"/srv/bosun-backups","Destination":"/var/lib/bosun-backups/"}]`, "sha256:bosun", "/srv/bosun-backups", ""},
+		{"no mount", `[{"Type":"volume","Name":"other","Destination":"/elsewhere"}]`, "", "", "bosun-backups volume"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := swapFake(true)
+			f.containers["gate-id"] = `{"Id":"gate-id","Name":"/bosun-gate","Image":"sha256:bosun","Config":{},"Mounts":` + tc.mounts + `}`
+			g := f.gate(t)
+			g.SelfID, g.BackupDir = "gate-id", "/var/lib/bosun-backups"
+			image, src, err := g.helper(context.Background())
+			if tc.errText != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.errText) {
+					t.Fatalf("want an error about the %s, got %v", tc.errText, err)
+				}
+				return
+			}
+			if err != nil || image != tc.image || src != tc.src {
+				t.Fatalf("helper() = %q %q %v, want %q %q", image, src, err, tc.image, tc.src)
+			}
+		})
+	}
+}
+
 func TestDataBackupMustMatchTheKeptVersion(t *testing.T) {
 	f := swapFake(true)
 	f.images["bosun/prev/app:abc"] = `{"Id":"sha256:prev"}`

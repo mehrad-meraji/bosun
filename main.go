@@ -32,8 +32,8 @@ func env(k, def string) string {
 var (
 	dockerSock = env("BOSUN_DOCKER_SOCK", "/var/run/docker.sock")
 	runDir     = env("BOSUN_RUN_DIR", "/run/bosun")
-	stateDir   = env("BOSUN_STATE_DIR", "/var/lib/bosun")
-	backupDir  = env("BOSUN_BACKUP_DIR", "/var/lib/bosun-backups")
+	stateDir   = filepath.Clean(env("BOSUN_STATE_DIR", "/var/lib/bosun"))
+	backupDir  = filepath.Clean(env("BOSUN_BACKUP_DIR", "/var/lib/bosun-backups"))
 	warnSize   = env("BOSUN_BACKUP_WARN_SIZE", "10GB")
 )
 
