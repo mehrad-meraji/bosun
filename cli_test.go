@@ -1,9 +1,14 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/mehrad-meraji/bosun/internal/backup"
+	"github.com/mehrad-meraji/bosun/internal/gate"
 )
 
 func TestSplitArgs(t *testing.T) {
@@ -31,5 +36,38 @@ func TestAgo(t *testing.T) {
 	}
 	if ago(time.Time{}) != "never" {
 		t.Error("zero time must be never")
+	}
+}
+
+func TestInside(t *testing.T) {
+	for _, tc := range []struct {
+		child, parent string
+		want          bool
+	}{
+		{"/run/bosun", "/run/bosun", true},
+		{"/run/bosun/state", "/run/bosun", true},
+		{"/run/bosun-backups", "/run/bosun", false},
+		{"/var/lib/bosun-backups", "/etc/bosun", false},
+		{"/etc/bosun/../bosun/x", "/etc/bosun", true},
+	} {
+		if got := inside(tc.child, tc.parent); got != tc.want {
+			t.Errorf("inside(%q, %q) = %v, want %v", tc.child, tc.parent, got, tc.want)
+		}
+	}
+}
+
+func TestBackupCol(t *testing.T) {
+	dir := t.TempDir()
+	backupDir = dir
+	if got := backupCol(gate.Watched{Name: "web"}); got != "off" {
+		t.Errorf("no label: %q", got)
+	}
+	if got := backupCol(gate.Watched{Name: "web", Backup: true}); got != "on, none yet" {
+		t.Errorf("no backup yet: %q", got)
+	}
+	os.MkdirAll(filepath.Join(dir, "web"), 0o700)
+	backup.WriteManifest(filepath.Join(dir, "web"), &backup.Manifest{Mounts: []backup.Mount{{Bytes: 3 << 30}}})
+	if got := backupCol(gate.Watched{Name: "web", Backup: true}); got != "on, 3.0 GB" {
+		t.Errorf("with backup: %q", got)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/mehrad-meraji/bosun/internal/backup"
 	"github.com/mehrad-meraji/bosun/internal/docker"
 	"github.com/mehrad-meraji/bosun/internal/gate"
 	"github.com/mehrad-meraji/bosun/internal/sock"
@@ -24,9 +25,10 @@ var help = map[string]string{
 		"  Example: docker exec -it bosun-gate bosun status",
 	"check": "bosun check [--dry-run]\n  Run an update round now. --dry-run only prints what it would do.\n" +
 		"  Example: docker exec -it bosun-gate bosun check --dry-run",
-	"rollback": "bosun rollback ls\nbosun rollback show <name>\nbosun rollback <name> [--dry-run] [--yes]\n" +
-		"  Go back to the version kept by the last update. It asks before it acts; --yes skips the question.\n" +
-		"  Example: docker exec -it bosun-gate bosun rollback nginx",
+	"rollback": "bosun rollback ls\nbosun rollback show <name> [--with-data]\nbosun rollback <name> [--with-data] [--dry-run] [--yes]\n" +
+		"  Go back to the version kept by the last update. --with-data also puts the volumes back from\n" +
+		"  the backup made before that update (containers with bosun.backup=true). It asks before it acts.\n" +
+		"  Example: docker exec -it bosun-gate bosun rollback nginx --with-data",
 	"skip": "bosun skip ls\nbosun skip clear <name>\n  List or clear versions Bosun will not update to.\n" +
 		"  Example: docker exec -it bosun-gate bosun skip clear nginx",
 }
@@ -86,12 +88,24 @@ func cmdStatus(ctx context.Context) error {
 		return err
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tMODE\tIMAGE\tLAST UPDATE\tDOWNTIME\tROLLBACK KEPT")
+	fmt.Fprintln(tw, "NAME\tMODE\tIMAGE\tLAST UPDATE\tDOWNTIME\tBACKUP\tROLLBACK KEPT")
 	for _, w := range ws {
 		e := st.Entry(w.Name)
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", w.Name, w.Mode, w.Ref, ago(e.UpdatedAt), dur(e.Downtime), yesNo(e.Prev != ""))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", w.Name, w.Mode, w.Ref, ago(e.UpdatedAt), dur(e.Downtime), backupCol(w), yesNo(e.Prev != ""))
 	}
 	return tw.Flush()
+}
+
+// backupCol says whether backups are on and how big the last one is.
+func backupCol(w gate.Watched) string {
+	if !w.Backup {
+		return "off"
+	}
+	m, err := backup.ReadManifest(filepath.Join(backupDir, w.Name))
+	if err != nil {
+		return "on, none yet"
+	}
+	return "on, " + backup.FormatSize(m.Bytes())
 }
 
 func cmdCheck(ctx context.Context, args []string) error {
@@ -119,7 +133,7 @@ func cmdCheck(ctx context.Context, args []string) error {
 // ponytail: a container named "ls" or "show" cannot be rolled back by name.
 func cmdRollback(ctx context.Context, args []string) error {
 	pos, flags := splitArgs(args)
-	if err := checkFlags(flags, "dry-run", "yes"); err != nil {
+	if err := checkFlags(flags, "dry-run", "yes", "with-data"); err != nil {
 		return err
 	}
 	if len(pos) == 0 {
@@ -136,10 +150,10 @@ func cmdRollback(ctx context.Context, args []string) error {
 		if len(pos) < 2 {
 			return errors.New("usage: bosun rollback show <name>")
 		}
-		return rollbackShow(ctx, st, pos[1])
+		return rollbackShow(ctx, st, pos[1], flags["with-data"])
 	}
 	name := pos[0]
-	if err := rollbackShow(ctx, st, name); err != nil {
+	if err := rollbackShow(ctx, st, name, flags["with-data"]); err != nil {
 		return err
 	}
 	if flags["dry-run"] {
@@ -149,7 +163,7 @@ func cmdRollback(ctx context.Context, args []string) error {
 	if !flags["yes"] && !confirm("Continue? [y/N] ") {
 		return errors.New("stopped; nothing changed")
 	}
-	res, err := newGate().Rollback(ctx, name, false)
+	res, err := newGate().Rollback(ctx, name, flags["with-data"])
 	if err != nil {
 		return err
 	}
@@ -163,7 +177,7 @@ func cmdRollback(ctx context.Context, args []string) error {
 func rollbackLs(ctx context.Context, st *state.State) error {
 	d := docker.New(dockerSock)
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tNOW\tBACK TO\tUPDATED")
+	fmt.Fprintln(tw, "NAME\tNOW\tBACK TO\tUPDATED\tDATA BACKUP")
 	n := 0
 	for _, name := range sortedNames(st) {
 		e := st.Containers[name]
@@ -174,7 +188,11 @@ func rollbackLs(ctx context.Context, st *state.State) error {
 		if c, err := d.Inspect(ctx, name); err == nil {
 			now = c.Config.Image + " (" + short(c.Image) + ")"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", name, now, e.Prev, ago(e.UpdatedAt))
+		data := "no"
+		if m, err := newGate().DataBackup(ctx, name, e.Prev); err == nil {
+			data = "yes, " + backup.FormatSize(m.Bytes())
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", name, now, e.Prev, ago(e.UpdatedAt), data)
 		n++
 	}
 	if n == 0 {
@@ -184,7 +202,7 @@ func rollbackLs(ctx context.Context, st *state.State) error {
 	return tw.Flush()
 }
 
-func rollbackShow(ctx context.Context, st *state.State, name string) error {
+func rollbackShow(ctx context.Context, st *state.State, name string, withData bool) error {
 	e := st.Containers[name]
 	if e == nil || e.Prev == "" {
 		return fmt.Errorf("no old version kept for %s. Run `bosun rollback ls` to see what you can roll back", name)
@@ -193,11 +211,27 @@ func rollbackShow(ctx context.Context, st *state.State, name string) error {
 	if err != nil {
 		return err
 	}
+	m, dataErr := newGate().DataBackup(ctx, name, e.Prev)
 	fmt.Printf("%s now runs %s (image %s).\n", name, c.Config.Image, short(c.Image))
 	fmt.Printf("A rollback puts back %s, from the update %s.\n", e.Prev, ago(e.UpdatedAt))
-	fmt.Println("Volumes are not changed. Data written by the newer version stays.")
+	switch {
+	case withData && dataErr != nil:
+		return dataErr
+	case withData:
+		fmt.Printf("With --with-data, the volumes go back to the backup from %s (%s). Data written since then is lost.\n",
+			ago(m.Time), backup.FormatSize(m.Bytes()))
+		fmt.Printf("A short helper container does this. It runs as root, with no network, and only sees %s's folders.\n", name)
+	case dataErr == nil:
+		fmt.Printf("Volumes are not changed. A data backup from %s is kept; add --with-data to put it back too.\n", ago(m.Time))
+	default:
+		fmt.Println("Volumes are not changed. Data written by the newer version stays.")
+	}
 	fmt.Println("The newer version goes on the skip list.")
-	fmt.Printf("To do it: docker exec -it bosun-gate bosun rollback %s\n", name)
+	flag := ""
+	if withData {
+		flag = " --with-data"
+	}
+	fmt.Printf("To do it: docker exec -it bosun-gate bosun rollback %s%s\n", name, flag)
 	return nil
 }
 

@@ -33,6 +33,8 @@ var (
 	dockerSock = env("BOSUN_DOCKER_SOCK", "/var/run/docker.sock")
 	runDir     = env("BOSUN_RUN_DIR", "/run/bosun")
 	stateDir   = env("BOSUN_STATE_DIR", "/var/lib/bosun")
+	backupDir  = env("BOSUN_BACKUP_DIR", "/var/lib/bosun-backups")
+	warnSize   = env("BOSUN_BACKUP_WARN_SIZE", "10GB")
 )
 
 func main() {
@@ -75,11 +77,37 @@ func run(ctx context.Context, cmd string, args []string) error {
 }
 
 func newGate() *gate.Gate {
-	self, _ := os.Hostname() // Docker sets it to the short container ID
-	return &gate.Gate{D: docker.New(dockerSock), Dir: stateDir, RunDir: runDir, SelfID: self}
+	self, _ := os.Hostname()              // Docker sets it to the short container ID
+	warn, _ := backup.ParseSize(warnSize) // checked at gate start by checkSettings
+	return &gate.Gate{D: docker.New(dockerSock), Dir: stateDir, RunDir: runDir, BackupDir: backupDir,
+		WarnSize: warn, SelfID: self}
+}
+
+// checkSettings refuses settings that would hand gate-only folders to the
+// updater, which gets RunDir and /etc/bosun.
+func checkSettings() error {
+	if _, err := backup.ParseSize(warnSize); err != nil {
+		return fmt.Errorf("BOSUN_BACKUP_WARN_SIZE: %w", err)
+	}
+	for _, d := range []struct{ name, path string }{{"BOSUN_STATE_DIR", stateDir}, {"BOSUN_BACKUP_DIR", backupDir}} {
+		for _, shared := range []string{runDir, "/etc/bosun"} {
+			if inside(d.path, shared) {
+				return fmt.Errorf("%s (%s) is inside %s, which the updater can read; pick a folder outside it", d.name, d.path, shared)
+			}
+		}
+	}
+	return nil
+}
+
+func inside(child, parent string) bool {
+	child, parent = filepath.Clean(child), filepath.Clean(parent)
+	return child == parent || strings.HasPrefix(child, parent+"/")
 }
 
 func runGate(ctx context.Context) error {
+	if err := checkSettings(); err != nil {
+		return err
+	}
 	g := newGate()
 	if err := g.Recover(ctx); err != nil {
 		return fmt.Errorf("crash recovery: %w", err)
