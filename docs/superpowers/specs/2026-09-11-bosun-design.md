@@ -36,8 +36,10 @@ The gate creates a container in only three cases:
 2. **Backup helper**: a short-lived container from Bosun's own image. See "Backups".
 3. **Updater**: Bosun's own updater, with fixed settings. See "Deploy".
 
-The gate refuses anything else, logs it loudly, and sends a note. A refusal means a bug
-or an attack. It is never silent.
+The gate refuses anything else and logs it loudly as `REFUSED`. The updater also gets
+the refusal as an error and sends a note. A refusal means a bug or an attack. The gate
+has no network, so a hacked updater could hide the note. The gate log is the record
+you can trust.
 
 ## Deploy
 
@@ -212,10 +214,10 @@ user already chose these with a label.
 | Setting | Default | Meaning |
 |---|---|---|
 | `BOSUN_SCHEDULE` | `0 4 * * *` | Cron string for rounds. |
-| `BOSUN_NOTIFY_FILE` | none | File with Shoutrrr URLs, one per line. A file, not an env var, because the URLs hold tokens and env vars show in `docker inspect`. Works with Docker secrets. |
+| `BOSUN_NOTIFY_FILE` | `/etc/bosun/notify.txt` | File with Shoutrrr URLs, one per line. A file, not an env var, because the URLs hold tokens and env vars show in `docker inspect`. Works with Docker secrets. |
 | `BOSUN_BACKUP_DIR` | none | Host folder for backups. Needed if any container uses `bosun.backup`. |
 | `BOSUN_BACKUP_WARN_SIZE` | `10GB` | Size that triggers the long-downtime warning. |
-| `BOSUN_REGISTRY_AUTH` | none | Path to a Docker `config.json`. |
+| Registry logins | none | Mount a Docker `config.json` at `/etc/bosun/docker/config.json`. Everything under `/etc/bosun` is passed to the updater read-only. |
 | `BOSUN_INSECURE_REGISTRIES` | none | Comma list of registries allowed over plain HTTP. |
 | `BOSUN_CA_FILE` | none | CA certificate for registries with private certificates. |
 
