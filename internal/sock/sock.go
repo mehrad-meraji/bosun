@@ -43,17 +43,30 @@ func Listen(path string) (net.Listener, error) {
 	return l, nil
 }
 
-// Serve runs h on l until ctx ends.
+// shutdownWait is how long Serve waits for running calls after ctx ends. A
+// swap can take a while; cutting it off is worse than a slow stop. Keep it
+// under stop_grace_period in compose.yml.
+const shutdownWait = 150 * time.Second
+
+// Serve runs h on l until ctx ends, then waits for running calls to finish
+// (up to shutdownWait) before it returns.
 func Serve(ctx context.Context, l net.Listener, h http.Handler) error {
 	srv := &http.Server{Handler: h, ReadHeaderTimeout: 5 * time.Second}
+	done := make(chan error, 1)
 	go func() {
 		<-ctx.Done()
-		srv.Close()
+		sctx, cancel := context.WithTimeout(context.Background(), shutdownWait)
+		defer cancel()
+		err := srv.Shutdown(sctx)
+		if err != nil {
+			srv.Close()
+		}
+		done <- err
 	}()
 	if err := srv.Serve(l); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
-	return nil
+	return <-done
 }
 
 // Post sends in as JSON and decodes a 200 reply into out. Any other status

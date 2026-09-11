@@ -5,6 +5,7 @@ services:
     build: .
     container_name: bosun-gate
     restart: unless-stopped
+    stop_grace_period: 3m # let a running update finish
     network_mode: none
     read_only: true
     cap_drop: [ALL]

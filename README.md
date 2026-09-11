@@ -28,6 +28,8 @@ container's image. Even if the network part is hacked, it cannot take over your 
    You will see two containers. `bosun-gate` is yours. `bosun-updater` is made by the
    gate, and the gate removes it when it stops.
 
+   Stopping Bosun waits for a running update to finish (up to 3 minutes).
+
 Bosun keeps its state (skip list, rollback records) in the `bosun-state` volume, which
 only the gate can reach.
 
