@@ -109,9 +109,9 @@ func rollbackWithDataFake(t *testing.T, newRunning bool) (*dockerFake, *Gate) {
 }
 
 func TestRollbackWithData(t *testing.T) {
-	t.Run("helper refuses (exit 2): old container restarted, nothing created", func(t *testing.T) {
+	t.Run("helper refuses (exit 3): old container restarted, nothing created", func(t *testing.T) {
 		f, g := rollbackWithDataFake(t, true)
-		f.replies["POST /containers/new-id/wait"] = `{"StatusCode":2}`
+		f.replies["POST /containers/new-id/wait"] = `{"StatusCode":3}`
 		_, err := g.Rollback(context.Background(), "app", true)
 		if err == nil || !strings.Contains(err.Error(), "current version is running again") {
 			t.Fatalf("want the current version running again, got %v", err)
@@ -130,23 +130,26 @@ func TestRollbackWithData(t *testing.T) {
 		}
 	})
 
-	t.Run("helper fails (exit 1): incomplete data, nothing restarted", func(t *testing.T) {
-		f, g := rollbackWithDataFake(t, true)
-		f.replies["POST /containers/new-id/wait"] = `{"StatusCode":1}`
-		_, err := g.Rollback(context.Background(), "app", true)
-		if err == nil || !strings.Contains(err.Error(), "incomplete data") || !strings.Contains(err.Error(), "--with-data` again") {
-			t.Fatalf("want an incomplete-data message telling the user to retry, got %v", err)
-		}
-		if f.calledAfter("POST /containers/new-id/wait", "POST /containers/old-id/start") {
-			t.Errorf("must not restart with incomplete data; calls: %v", f.calls)
-		}
-		if f.calledAfter("POST /containers/new-id/wait", retagOld) {
-			t.Errorf("data was restored, so the tag must stay on the old image; calls: %v", f.calls)
-		}
-		if st, _ := state.Read(g.Dir); !st.Entry("app").DataRestored {
-			t.Error("the restore began, so the data must be marked restored")
-		}
-	})
+	// 2 is what a Go crash exits with, so it is a failure, not "nothing changed".
+	for _, code := range []string{"1", "2"} {
+		t.Run("helper fails (exit "+code+"): incomplete data, nothing restarted", func(t *testing.T) {
+			f, g := rollbackWithDataFake(t, true)
+			f.replies["POST /containers/new-id/wait"] = `{"StatusCode":` + code + `}`
+			_, err := g.Rollback(context.Background(), "app", true)
+			if err == nil || !strings.Contains(err.Error(), "incomplete data") || !strings.Contains(err.Error(), "--with-data` again") {
+				t.Fatalf("want an incomplete-data message telling the user to retry, got %v", err)
+			}
+			if f.calledAfter("POST /containers/new-id/wait", "POST /containers/old-id/start") {
+				t.Errorf("must not restart with incomplete data; calls: %v", f.calls)
+			}
+			if f.calledAfter("POST /containers/new-id/wait", retagOld) {
+				t.Errorf("data was restored, so the tag must stay on the old image; calls: %v", f.calls)
+			}
+			if st, _ := state.Read(g.Dir); !st.Entry("app").DataRestored {
+				t.Error("the restore began, so the data must be marked restored")
+			}
+		})
+	}
 
 	t.Run("helper ok, new version unhealthy: reverted, stays stopped", func(t *testing.T) {
 		f, g := rollbackWithDataFake(t, false)

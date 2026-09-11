@@ -145,7 +145,9 @@ func (g *Gate) restore(ctx context.Context, c *docker.Container, m *backup.Manif
 		return nil
 	}
 	out, _ := g.D.Logs(ctx, id)
-	if code == 2 {
+	// 3 means the helper changed nothing. Any other code, 2 (a Go crash)
+	// included, may have left the data half done.
+	if code == 3 {
 		return fmt.Errorf("restore helper refused: %s (%w)", out, errUntouched)
 	}
 	return fmt.Errorf("restore helper failed (exit %d): %s", code, out)

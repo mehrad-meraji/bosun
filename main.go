@@ -48,7 +48,7 @@ func main() {
 	if err := run(ctx, os.Args[1], os.Args[2:]); err != nil {
 		fmt.Fprintln(os.Stderr, "bosun:", err)
 		if errors.Is(err, backup.ErrUntouched) {
-			os.Exit(2) // the restore helper changed nothing
+			os.Exit(3) // the restore helper changed nothing; not 2, which a Go crash uses
 		}
 		os.Exit(1)
 	}
@@ -69,6 +69,13 @@ func run(ctx context.Context, cmd string, args []string) error {
 	case "skip":
 		return cmdSkip(args)
 	case "restore-helper":
+		// A crash must not look like "nothing was changed"; Go exits 2 on a panic.
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintln(os.Stderr, "bosun: restore helper crashed:", r)
+				os.Exit(1)
+			}
+		}()
 		return backup.Restore(args)
 	case "help", "-h", "--help":
 		return cmdHelp(args)
