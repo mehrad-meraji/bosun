@@ -10,10 +10,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/mehrad-meraji/bosun/internal/backup"
 	"github.com/mehrad-meraji/bosun/internal/docker"
 	"github.com/mehrad-meraji/bosun/internal/gate"
 	"github.com/mehrad-meraji/bosun/internal/registry"
@@ -228,6 +230,67 @@ func TestRecoverRestoresOld(t *testing.T) {
 	st, _ := state.Read(g.Dir)
 	if len(st.Pending) != 0 || len(st.Events) != 1 || !strings.Contains(st.Events[0].Message, "old version is back") {
 		t.Fatalf("state = %+v", st)
+	}
+}
+
+var helperOnce sync.Once
+
+// helperImage builds Bosun's image once, for the restore helper.
+func helperImage(t *testing.T) string {
+	t.Helper()
+	const tag = "bosun-it-helper:latest"
+	helperOnce.Do(func() { sh(t, "docker", "build", "-q", "-t", tag, "../..") })
+	return tag
+}
+
+func TestBackupAndRestoreData(t *testing.T) {
+	g, name := setup(t)
+	ctx := context.Background()
+	vol := name + "-named"
+	t.Cleanup(func() {
+		exec.Command("docker", "rm", "-f", "-v", name).Run()
+		exec.Command("docker", "volume", "rm", vol).Run()
+	})
+	// A host folder the gate writes and Docker can bind into the helper.
+	dir, err := os.MkdirTemp("", "bosun-it-backups")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	g.BackupDir, g.BackupSrc, g.HelperImage = dir, dir, helperImage(t)
+
+	push(t, v1)
+	runApp(t, name, "--label", "bosun.backup=true", "-v", vol+":/named", "--mount", "type=volume,dst=/anon")
+	sh(t, "docker", "exec", name, "sh", "-c", "echo v1 > /named/f && echo v1 > /anon/f")
+
+	d2 := push(t, v2)
+	res, err := g.Update(ctx, name, d2, "")
+	if err != nil || res.Status != gate.StatusDone || res.BackupBytes == 0 {
+		t.Fatalf("update with backup: %+v %v", res, err)
+	}
+	m, err := backup.ReadManifest(filepath.Join(dir, name))
+	if err != nil || len(m.Mounts) != 2 {
+		t.Fatalf("manifest = %+v %v, want 2 mounts", m, err)
+	}
+
+	sh(t, "docker", "exec", name, "sh", "-c", "echo v2 > /named/f && echo later > /named/new.txt && echo v2 > /anon/f")
+	res, err = g.Rollback(ctx, name, true)
+	if err != nil || res.Status != gate.StatusDone {
+		t.Fatalf("rollback --with-data: %+v %v", res, err)
+	}
+	if v := version(t, name); v != "v1" {
+		t.Fatalf("running %s, want v1", v)
+	}
+	for file, want := range map[string]string{"/named/f": "v1", "/anon/f": "v1"} {
+		if got := sh(t, "docker", "exec", name, "cat", file); got != want {
+			t.Errorf("%s = %q, want %q", file, got, want)
+		}
+	}
+	if exec.Command("docker", "exec", name, "test", "-e", "/named/new.txt").Run() == nil {
+		t.Error("a file made after the backup survived the restore")
+	}
+	if out := sh(t, "docker", "ps", "-a", "--filter", "name="+name+"-bosun-restore", "-q"); out != "" {
+		t.Errorf("restore helper left behind: %s", out)
 	}
 }
 
