@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -193,6 +194,23 @@ func TestUpdateBackupFailureStopsTheUpdate(t *testing.T) {
 	}
 	if !f.called(retagOld) {
 		t.Errorf("tag not put back on the old image; calls: %v", f.calls)
+	}
+}
+
+func TestUpdateNoSpaceLeavesTheAppRunning(t *testing.T) {
+	f, g := backupFake(t, true)
+	dir := filepath.Join(g.BackupDir, "app")
+	os.MkdirAll(dir, 0o700)
+	backup.WriteManifest(dir, &backup.Manifest{Image: "sha256:older", Mounts: []backup.Mount{{Bytes: 1 << 62}}})
+	_, err := g.Update(context.Background(), "app", "sha256:d2", "")
+	if !errors.Is(err, errNoSpace) || !strings.HasSuffix(err.Error(), "; free space in the backup folder, or remove bosun.backup=true") {
+		t.Fatalf("want a no-space error with the next step, got %v", err)
+	}
+	if f.called("POST /containers/old-id/stop") {
+		t.Errorf("stopped the app though the backup could not fit; calls: %v", f.calls)
+	}
+	if st, _ := state.Read(g.Dir); len(st.Pending) != 0 {
+		t.Errorf("pending record left: %+v", st.Pending)
 	}
 }
 

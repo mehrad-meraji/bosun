@@ -19,6 +19,8 @@ import (
 
 var errNoSpace = errors.New("not enough free space in the backup folder")
 
+const noSpaceHint = "; free space in the backup folder, or remove bosun.backup=true"
+
 // backupMounts are the mounts a backup copies: writable volumes and host
 // folders. Read-only mounts cannot change, so they need no copy.
 // ponytail: sockets are skipped by name (*.sock); Docker cannot tar them.
@@ -38,6 +40,24 @@ func backupMounts(c *docker.Container) []docker.Mount {
 // container names must start with a letter or digit, never a dot.
 func (g *Gate) backupPaths(name string) (dir, tmp, old string) {
 	return filepath.Join(g.BackupDir, name), filepath.Join(g.BackupDir, "."+name+".new"), filepath.Join(g.BackupDir, "."+name+".old")
+}
+
+// checkBackupSpace refuses a backup of name before the app is stopped when
+// the backup folder is unset or clearly too full.
+// ponytail: the last backup's size is the free-space guess; a disk that
+// fills anyway is caught as ENOSPC during the copy.
+func (g *Gate) checkBackupSpace(name string) error {
+	if g.BackupDir == "" {
+		return fmt.Errorf("%s has %s=true but no backup folder is set; set BOSUN_BACKUP_DIR", name, LabelBackup)
+	}
+	dir, _, _ := g.backupPaths(name)
+	if prev, err := backup.ReadManifest(dir); err == nil {
+		if free, err := backup.Free(g.BackupDir); err == nil && free < uint64(prev.Bytes()) {
+			return fmt.Errorf("%w: the last backup of %s was %s and only %s is free"+noSpaceHint,
+				errNoSpace, name, backup.FormatSize(prev.Bytes()), backup.FormatSize(int64(free)))
+		}
+	}
+	return nil
 }
 
 // takeBackup copies c's mounts into BackupDir/.<name>.new using Docker's
@@ -62,14 +82,6 @@ func (g *Gate) takeBackup(ctx context.Context, c *docker.Container) (m *backup.M
 			os.RemoveAll(tmp)
 		}
 	}()
-	// ponytail: the last backup's size is the free-space guess; a disk that
-	// fills anyway is caught as ENOSPC during the copy.
-	if prev, err := backup.ReadManifest(dir); err == nil {
-		if free, err := backup.Free(g.BackupDir); err == nil && free < uint64(prev.Bytes()) {
-			return nil, nil, fmt.Errorf("%w: the last backup of %s was %s and only %s is free",
-				errNoSpace, name, backup.FormatSize(prev.Bytes()), backup.FormatSize(int64(free)))
-		}
-	}
 	m = &backup.Manifest{Image: c.Image, Time: time.Now().UTC()}
 	for i, mt := range backupMounts(c) {
 		file := strconv.Itoa(i) + ".tar"
@@ -80,6 +92,9 @@ func (g *Gate) takeBackup(ctx context.Context, c *docker.Container) (m *backup.M
 		m.Mounts = append(m.Mounts, backup.Mount{Dest: mt.Destination, File: file, Bytes: n})
 	}
 	if err := backup.WriteManifest(tmp, m); err != nil {
+		if errors.Is(err, syscall.ENOSPC) {
+			err = fmt.Errorf("%w"+noSpaceHint, errNoSpace)
+		}
 		return nil, nil, err
 	}
 	done = true
@@ -117,7 +132,7 @@ func (g *Gate) copyOut(ctx context.Context, id, path, file string) (int64, error
 		err = cerr
 	}
 	if errors.Is(err, syscall.ENOSPC) {
-		err = errNoSpace
+		err = fmt.Errorf("%w"+noSpaceHint, errNoSpace)
 	}
 	return n, err
 }

@@ -317,6 +317,13 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 		return Result{}, fmt.Errorf("%s: build the new container: %w", name, err)
 	}
 
+	// Check before the stop, so a full disk does not stop the app each round.
+	if opts.backup {
+		if err := g.checkBackupSpace(name); err != nil {
+			return Result{}, fmt.Errorf("%s: no update: %w", name, err)
+		}
+	}
+
 	p := state.Pending{Name: name, OldID: old.ID, TmpName: name + "-bosun-" + randHex(), Digest: opts.digest, KeepStopped: opts.keepStopped}
 	st.Pending = append(st.Pending, p)
 	if err := f.Save(st); err != nil {
