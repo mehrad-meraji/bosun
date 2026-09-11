@@ -135,7 +135,7 @@ func TestUpdateRevertSkipAndRollback(t *testing.T) {
 		t.Fatalf("a skipped digest must be refused, got %v", err)
 	}
 
-	res, err = g.Rollback(ctx, name)
+	res, err = g.Rollback(ctx, name, false)
 	if err != nil || res.Status != gate.StatusDone {
 		t.Fatalf("rollback: %+v %v", res, err)
 	}

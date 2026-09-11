@@ -355,7 +355,7 @@ func TestRollbackPutsTagBackUnlessItWorks(t *testing.T) {
 			f.fail["POST /containers/old-id/stop"] = tc.stopFails
 			g := f.gate(t)
 			setEntry(t, g, "app", state.Entry{Prev: "bosun/prev/app:abc"})
-			_, _ = g.Rollback(context.Background(), "app")
+			_, _ = g.Rollback(context.Background(), "app", false)
 			if !f.called(retagPrev) {
 				t.Fatalf("tag not moved to the kept image; calls: %v", f.calls)
 			}

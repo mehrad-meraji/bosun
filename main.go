@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/mehrad-meraji/bosun/internal/backup"
 	"github.com/mehrad-meraji/bosun/internal/docker"
 	"github.com/mehrad-meraji/bosun/internal/gate"
 	"github.com/mehrad-meraji/bosun/internal/registry"
@@ -43,6 +45,9 @@ func main() {
 	defer stop()
 	if err := run(ctx, os.Args[1], os.Args[2:]); err != nil {
 		fmt.Fprintln(os.Stderr, "bosun:", err)
+		if errors.Is(err, backup.ErrUntouched) {
+			os.Exit(2) // the restore helper changed nothing
+		}
 		os.Exit(1)
 	}
 }
@@ -61,6 +66,8 @@ func run(ctx context.Context, cmd string, args []string) error {
 		return cmdRollback(ctx, args)
 	case "skip":
 		return cmdSkip(args)
+	case "restore-helper":
+		return backup.Restore(args)
 	case "help", "-h", "--help":
 		return cmdHelp(args)
 	}

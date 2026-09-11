@@ -170,8 +170,9 @@ func (g *Gate) Update(ctx context.Context, name, digest, auth string) (Result, e
 	return res, f.Save(st)
 }
 
-// Rollback puts back the version kept by the last update.
-func (g *Gate) Rollback(ctx context.Context, name string) (Result, error) {
+// Rollback puts back the version kept by the last update. withData also puts
+// the volumes back from the backup that belongs with that version.
+func (g *Gate) Rollback(ctx context.Context, name string, withData bool) (Result, error) {
 	f, st, err := state.Open(g.Dir, false)
 	if err != nil {
 		return Result{}, err
@@ -189,6 +190,12 @@ func (g *Gate) Rollback(ctx context.Context, name string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	var m *backup.Manifest
+	if withData {
+		if m, err = g.DataBackup(ctx, name, e.Prev); err != nil {
+			return Result{}, err
+		}
+	}
 	repo, tag := docker.SplitRef(ref)
 	// Point the tag back at the old image, so the container keeps a readable ref.
 	if err := g.D.Tag(ctx, e.Prev, repo, tag); err != nil {
@@ -202,11 +209,32 @@ func (g *Gate) Rollback(ctx context.Context, name string) (Result, error) {
 			g.retag(ctx, c.Image, ref)
 		}
 	}()
+	if withData {
+		if err := g.D.Stop(ctx, c.ID); err != nil {
+			return Result{}, fmt.Errorf("%s: stop: %w", name, err)
+		}
+		if err := g.restore(ctx, c, m); err != nil {
+			if errors.Is(err, errUntouched) {
+				if serr := g.D.Start(ctx, c.ID); serr != nil {
+					return Result{}, fmt.Errorf("%s: %v. Starting it again failed: %v. Start it with: docker start %s", name, err, serr, name)
+				}
+				return Result{}, fmt.Errorf("%s: %v. The current version is running again", name, err)
+			}
+			return Result{}, fmt.Errorf("%s: %v. %s is stopped with incomplete data; run `bosun rollback %s --with-data` again", name, err, name, name)
+		}
+	}
 	res, err := g.swap(ctx, f, st, c, ref, "", false)
 	if err != nil {
 		return Result{}, err
 	}
 	if res.Status == StatusReverted {
+		if withData {
+			// The revert started the newer version on the old data. Stop it.
+			_ = g.D.Stop(ctx, c.ID)
+			res.Message = fmt.Sprintf("%s: the data went back to the backup from %s, but the old version did not come up healthy. %s is stopped, so the newer version does not run on old data. Check `docker logs %s`",
+				name, m.Time.Format("2006-01-02 15:04"), name, name)
+			return res, nil
+		}
 		res.Message = fmt.Sprintf("%s: the old version did not come up healthy; the current version is kept", name)
 		return res, nil
 	}
@@ -218,6 +246,9 @@ func (g *Gate) Rollback(ctx context.Context, name string) (Result, error) {
 	e.Prev, e.UpdatedAt = "", time.Now().UTC()
 	res.Message = fmt.Sprintf("%s: rolled back (down %s). The newer version is on the skip list; `bosun skip clear %s` allows it again",
 		name, res.Downtime.Round(100*time.Millisecond), name)
+	if withData {
+		res.Message += fmt.Sprintf(". Data is from the backup of %s", m.Time.Format("2006-01-02 15:04"))
+	}
 	return res, f.Save(st)
 }
 

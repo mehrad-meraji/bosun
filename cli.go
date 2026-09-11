@@ -149,7 +149,7 @@ func cmdRollback(ctx context.Context, args []string) error {
 	if !flags["yes"] && !confirm("Continue? [y/N] ") {
 		return errors.New("stopped; nothing changed")
 	}
-	res, err := newGate().Rollback(ctx, name)
+	res, err := newGate().Rollback(ctx, name, false)
 	if err != nil {
 		return err
 	}
