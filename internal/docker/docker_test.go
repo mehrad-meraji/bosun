@@ -115,3 +115,54 @@ func TestSplitRef(t *testing.T) {
 		}
 	}
 }
+
+func TestArchive(t *testing.T) {
+	c := fake(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1.44/containers/abc/archive" || r.URL.Query().Get("path") != "/var/lib/data" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL)
+		}
+		io.WriteString(w, "TARBYTES")
+	})
+	rc, err := c.Archive(context.Background(), "abc", "/var/lib/data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	if b, _ := io.ReadAll(rc); string(b) != "TARBYTES" {
+		t.Fatalf("body = %q", b)
+	}
+}
+
+func TestWait(t *testing.T) {
+	c := fake(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1.44/containers/abc/wait" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL)
+		}
+		io.WriteString(w, `{"StatusCode":2}`)
+	})
+	if code, err := c.Wait(context.Background(), "abc"); err != nil || code != 2 {
+		t.Fatalf("Wait = %d, %v; want 2", code, err)
+	}
+}
+
+func TestWaitError(t *testing.T) {
+	c := fake(t, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"StatusCode":0,"Error":{"Message":"container gone"}}`)
+	})
+	if _, err := c.Wait(context.Background(), "abc"); err == nil || !strings.Contains(err.Error(), "container gone") {
+		t.Fatalf("want the wait error, got %v", err)
+	}
+}
+
+func TestLogs(t *testing.T) {
+	c := fake(t, func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if r.URL.Path != "/v1.44/containers/abc/logs" || q.Get("stdout") != "1" || q.Get("stderr") != "1" {
+			t.Errorf("unexpected request: %s", r.URL)
+		}
+		io.WriteString(w, "bosun: backup file is unreadable\n")
+	})
+	if out, err := c.Logs(context.Background(), "abc"); err != nil || out != "bosun: backup file is unreadable" {
+		t.Fatalf("Logs = %q, %v", out, err)
+	}
+}

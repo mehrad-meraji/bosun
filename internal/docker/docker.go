@@ -250,6 +250,44 @@ func (c *Client) RemoveImage(ctx context.Context, ref string) error {
 	return c.call(ctx, http.MethodDelete, "/images/"+ref, nil, nil, nil)
 }
 
+// Archive streams a tar of path from a container, running or stopped. Docker
+// names each entry after the last part of path. The caller closes it.
+func (c *Client) Archive(ctx context.Context, id, path string) (io.ReadCloser, error) {
+	resp, err := c.do(ctx, http.MethodGet, "/containers/"+id+"/archive", url.Values{"path": {path}}, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Body, nil
+}
+
+// Wait blocks until the container stops and returns its exit code.
+func (c *Client) Wait(ctx context.Context, id string) (int, error) {
+	var out struct {
+		StatusCode int
+		Error      *struct{ Message string }
+	}
+	if err := c.call(ctx, http.MethodPost, "/containers/"+id+"/wait", nil, nil, &out); err != nil {
+		return 0, err
+	}
+	if out.Error != nil && out.Error.Message != "" {
+		return out.StatusCode, errors.New(out.Error.Message)
+	}
+	return out.StatusCode, nil
+}
+
+// Logs returns the last lines a container printed, up to 4 KB. The container
+// must use Tty: true, so the output is plain text without Docker's framing.
+func (c *Client) Logs(ctx context.Context, id string) (string, error) {
+	q := url.Values{"stdout": {"1"}, "stderr": {"1"}, "tail": {"50"}}
+	resp, err := c.do(ctx, http.MethodGet, "/containers/"+id+"/logs", q, nil, nil)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	return strings.TrimSpace(string(b)), err
+}
+
 // SplitRef splits "host:5000/app:1.2" into ("host:5000/app", "1.2").
 // No tag means "latest".
 func SplitRef(ref string) (repo, tag string) {
