@@ -49,10 +49,11 @@ func (g *Gate) recoverOne(ctx context.Context, p state.Pending) (string, error) 
 			return "", fmt.Errorf("both old container %s and current container %s are missing", p.OldID, p.Name)
 		}
 		// A container is running at p.Name; keep it and start it if stopped
+		msg := p.Name + ": an update was cut off; the old container was already gone, so the current one was kept"
 		if !cur.State.Running {
-			_ = g.D.Start(ctx, cur.ID)
+			return msg, g.D.Start(ctx, cur.ID)
 		}
-		return p.Name + ": an update was cut off; the old container was already gone, so the current one was kept", nil
+		return msg, nil
 	}
 
 	// Old container exists. Check the container at p.Name
