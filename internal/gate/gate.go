@@ -203,9 +203,14 @@ func (g *Gate) Rollback(ctx context.Context, name string, withData bool) (Result
 	}
 	ctx = context.WithoutCancel(ctx)
 	// Unless the rollback works, point the tag back at the current image.
+	// Once the restore has begun, the volumes match the old image instead,
+	// so the tag must stay there — except when the restore helper refused
+	// and changed nothing, in which case the current version keeps running
+	// and the tag must go back to it, as usual.
 	ok := false
+	restored := false
 	defer func() {
-		if !ok {
+		if !ok && !restored {
 			g.retag(ctx, c.Image, ref)
 		}
 	}()
@@ -213,8 +218,10 @@ func (g *Gate) Rollback(ctx context.Context, name string, withData bool) (Result
 		if err := g.D.Stop(ctx, c.ID); err != nil {
 			return Result{}, fmt.Errorf("%s: stop: %w", name, err)
 		}
+		restored = true
 		if err := g.restore(ctx, c, m); err != nil {
 			if errors.Is(err, errUntouched) {
+				restored = false // nothing changed; the tag must go back to the current image
 				if serr := g.D.Start(ctx, c.ID); serr != nil {
 					return Result{}, fmt.Errorf("%s: %v. Starting it again failed: %v. Start it with: docker start %s", name, err, serr, name)
 				}

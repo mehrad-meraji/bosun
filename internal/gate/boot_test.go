@@ -345,6 +345,33 @@ func TestRecoverKeepStoppedNeverRestartsRestoredData(t *testing.T) {
 	if !strings.Contains(st.Events[0].Message, "is stopped") {
 		t.Errorf("event must say the container is stopped: %s", st.Events[0].Message)
 	}
+	if f.called(retagOld) {
+		t.Errorf("data was restored, so the tag must stay on the old image; calls: %v", f.calls)
+	}
+}
+
+// When a --with-data recovery itself fails (the rename back to the app's
+// name fails), the event must never tell the user to start the container:
+// its mounts hold restored (old) data under the newer image.
+func TestRecoverKeepStoppedFailureDoesNotSayStartIt(t *testing.T) {
+	f := recoverFake(false, "") // new container exists but unhealthy
+	f.fail["POST /containers/old-id/rename"] = true
+	g := f.gate(t)
+	setEntry(t, g, "app", state.Entry{}, state.Pending{Name: "app", OldID: "old-id", TmpName: "app-bosun-x", KeepStopped: true})
+	if err := g.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	st, err := state.Read(g.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Pending) != 1 || len(st.Events) != 1 {
+		t.Fatalf("state = %+v, want the pending record kept and one event", st)
+	}
+	msg := st.Events[0].Message
+	if !strings.Contains(msg, "do not start it") || strings.Contains(msg, "and start it") {
+		t.Errorf("event must say not to start it, and never tell the user to start it: %s", msg)
+	}
 }
 
 // A cut-off rollback that is kept must skip the version it left, or the next

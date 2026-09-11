@@ -122,6 +122,9 @@ func TestRollbackWithData(t *testing.T) {
 		if f.called("POST /containers/create?name=app") {
 			t.Errorf("must not have created the new app container; calls: %v", f.calls)
 		}
+		if !f.calledAfter("POST /containers/new-id/wait", retagOld) {
+			t.Errorf("nothing changed, so the tag must go back to the current image; calls: %v", f.calls)
+		}
 	})
 
 	t.Run("helper fails (exit 1): incomplete data, nothing restarted", func(t *testing.T) {
@@ -133,6 +136,9 @@ func TestRollbackWithData(t *testing.T) {
 		}
 		if f.calledAfter("POST /containers/new-id/wait", "POST /containers/old-id/start") {
 			t.Errorf("must not restart with incomplete data; calls: %v", f.calls)
+		}
+		if f.calledAfter("POST /containers/new-id/wait", retagOld) {
+			t.Errorf("data was restored, so the tag must stay on the old image; calls: %v", f.calls)
 		}
 	})
 
@@ -146,6 +152,9 @@ func TestRollbackWithData(t *testing.T) {
 		if f.calledAfter("POST /containers/new-id/wait", "POST /containers/old-id/start") {
 			t.Errorf("must never restart the old container after a with-data revert; calls: %v", f.calls)
 		}
+		if f.calledAfter("POST /containers/new-id/wait", retagOld) {
+			t.Errorf("data was restored, so the tag must stay on the old image; calls: %v", f.calls)
+		}
 	})
 
 	t.Run("helper ok, rename fails: stopped with the backup's data", func(t *testing.T) {
@@ -158,6 +167,9 @@ func TestRollbackWithData(t *testing.T) {
 		}
 		if f.calledAfter("POST /containers/new-id/wait", "POST /containers/old-id/start") {
 			t.Errorf("must not start after the rename failed; calls: %v", f.calls)
+		}
+		if f.calledAfter("POST /containers/new-id/wait", retagOld) {
+			t.Errorf("data was restored, so the tag must stay on the old image; calls: %v", f.calls)
 		}
 	})
 

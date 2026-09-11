@@ -26,7 +26,11 @@ func (g *Gate) Recover(ctx context.Context) error {
 	for _, p := range st.Pending {
 		msg, err := g.recoverOne(ctx, st, p)
 		if err != nil {
-			msg = fmt.Sprintf("%s: crash recovery failed: %v. The old container may be stopped as %s: rename it back to %s and start it, then restart bosun-gate.", p.Name, err, p.TmpName, p.Name)
+			if p.KeepStopped {
+				msg = fmt.Sprintf("%s: recovery of a rollback with data failed: %v. The old container may be stopped as %s; do not start it on this data. Rename it back to %s and run `bosun rollback %s --with-data` again.", p.Name, err, p.TmpName, p.Name, p.Name)
+			} else {
+				msg = fmt.Sprintf("%s: crash recovery failed: %v. The old container may be stopped as %s: rename it back to %s and start it, then restart bosun-gate.", p.Name, err, p.TmpName, p.Name)
+			}
 			failed = append(failed, p)
 		}
 		st.AddEvent("recovered", p.Name, msg)
@@ -92,10 +96,12 @@ func (g *Gate) recoverOne(ctx context.Context, st *state.State, p state.Pending)
 	if p.Digest != "" {
 		st.Entry(p.Name).AddSkip(p.Digest)
 	}
-	g.retag(ctx, old.Image, old.Config.Image)
 	if p.KeepStopped {
+		// The volumes hold the restored (old) data, so the tag must stay on
+		// the old image; do not point it back at the newer one.
 		return fmt.Sprintf("%s: a rollback with data was cut off; %s is stopped with the backup's data. Run `bosun rollback %s --with-data` again", p.Name, p.Name, p.Name), nil
 	}
+	g.retag(ctx, old.Image, old.Config.Image)
 	return p.Name + ": an update was cut off; the old version is back", g.D.Start(ctx, p.OldID)
 }
 
