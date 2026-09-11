@@ -41,7 +41,11 @@ func (g *Gate) takeBackup(ctx context.Context, c *docker.Container) (*backup.Man
 		return nil, fmt.Errorf("%s has %s=true but no backup folder is set; set BOSUN_BACKUP_DIR", name, LabelBackup)
 	}
 	dir := filepath.Join(g.BackupDir, name)
-	tmp, old := dir+".new", dir+".old"
+	// Hidden names (leading dot) so a container literally named "<name>.new"
+	// or "<name>.old" never collides with our temp/backup folders — Docker
+	// container names must start with a letter or digit, never a dot.
+	tmp := filepath.Join(g.BackupDir, "."+name+".new")
+	old := filepath.Join(g.BackupDir, "."+name+".old")
 	if err := os.RemoveAll(tmp); err != nil {
 		return nil, err
 	}

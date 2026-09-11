@@ -102,6 +102,39 @@ func TestTakeBackupFailureKeepsTheOldOne(t *testing.T) {
 	}
 }
 
+func TestTakeBackupLeavesOtherBackupsAlone(t *testing.T) {
+	_, g := backupFake(t, true)
+	newDir := filepath.Join(g.BackupDir, "app.new")
+	oldDir := filepath.Join(g.BackupDir, "app.old")
+	os.MkdirAll(newDir, 0o700)
+	os.MkdirAll(oldDir, 0o700)
+	backup.WriteManifest(newDir, &backup.Manifest{Image: "sha256:newcontainer"})
+	backup.WriteManifest(oldDir, &backup.Manifest{Image: "sha256:oldcontainer"})
+
+	c, err := g.D.Inspect(context.Background(), "old-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.takeBackup(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+
+	if m, err := backup.ReadManifest(newDir); err != nil || m.Image != "sha256:newcontainer" {
+		t.Errorf("app.new's backup was disturbed: %+v %v", m, err)
+	}
+	if m, err := backup.ReadManifest(oldDir); err != nil || m.Image != "sha256:oldcontainer" {
+		t.Errorf("app.old's backup was disturbed: %+v %v", m, err)
+	}
+	for _, left := range []string{
+		filepath.Join(g.BackupDir, ".app.new"),
+		filepath.Join(g.BackupDir, ".app.old"),
+	} {
+		if _, err := os.Stat(left); err == nil {
+			t.Errorf("%s left behind", left)
+		}
+	}
+}
+
 func TestUpdateBacksUpWhileStopped(t *testing.T) {
 	f, g := backupFake(t, true)
 	g.WarnSize = 1 // any backup is "big", to test the one-time warning
