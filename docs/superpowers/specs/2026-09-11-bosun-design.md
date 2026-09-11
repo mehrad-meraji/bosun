@@ -33,7 +33,8 @@ The gate creates a container in only three cases:
    bookkeeping). The gate builds this request from the old container, so no caller
    can add mounts, `privileged`, capabilities, devices, `network_mode: host`,
    `pid: host`, or a different user.
-2. **Backup helper**: a short-lived container from Bosun's own image. See "Backups".
+2. **Restore helper**: a short-lived container from Bosun's own image, only for
+   `rollback --with-data`. See "Backups".
 3. **Updater**: Bosun's own updater, with fixed settings. See "Deploy".
 
 The gate refuses anything else and logs it loudly as `REFUSED`. The updater also gets
@@ -173,35 +174,48 @@ list and the rollback records. Containers keep running, and the next round works
 Opt-in per container with `bosun.backup=true`.
 
 - Run while the app is stopped (step 3 above), so database files are in a clean state.
-- One backup per container, matching the one kept old image.
-- Stored in `BOSUN_BACKUP_DIR` on the host.
-- Before a backup, the gate checks free space. If there is not enough, it skips the
-  update and reports.
+- What is backed up: every writable mount of the container, both volumes (named and
+  anonymous) and host folders. Read-only mounts and `*.sock` files are skipped.
+- **How:** the gate asks Docker for a tar copy of each mount from the stopped
+  container (`GET /containers/{id}/archive`). Docker keeps file owners and modes. No
+  helper container runs for a backup.
+- One backup per container, matching the one kept old image. A `manifest.json` records
+  the image ID, the time, and each mount's path and size.
+- Stored in `BOSUN_BACKUP_DIR` inside the gate (default `/var/lib/bosun-backups`, the
+  `bosun-backups` volume). Only the gate mounts it. The updater never gets it.
+- The new backup is written next to the old one and only replaces it when complete.
+- Free space: before a backup, the gate checks there is at least as much free space as
+  the last backup used. If the disk fills during the copy, the gate stops, deletes the
+  partial copy, starts the old container again, and reports.
 
-### Backup helper container
+### Restore helper container
 
-- Runs Bosun's own image (by ID) with the `backup-helper` command. No other tools come
+Docker's copy can add and overwrite files, but it cannot delete them. A restore must
+also remove files written after the backup, so it uses a small helper:
+
+- Runs only for `rollback <name> --with-data`, which a person types and confirms.
+- Runs Bosun's own image (by ID) with the `restore-helper` command. No other tools come
   in.
-- Mounts the app's volumes read-only (read-write only for a restore), plus the backup
-  folder.
-- `network_mode: none`, read-only root file system, `no-new-privileges`.
-- **Runs as the same user as the app. It never gets more power than the app already
-  has.** Many official images (for example `postgres`) start as root. For those, the
-  helper also runs as root, inside the limits above. It gets only the capabilities it
-  needs to read, write, and keep file owners.
-- Removed when the copy ends.
+- Mounts the app's backed-up mounts read-write, and the backup folder read-only.
+- Runs as root, because it must delete any file and keep file owners. It is locked
+  down: `network_mode: none`, read-only root file system, `no-new-privileges`, all
+  capabilities dropped except `CHOWN`, `DAC_OVERRIDE`, and `FOWNER`.
+- Checks every tar file is readable before it deletes anything.
+- Removed when the restore ends.
+- Order: stop the app, restore the data, then swap to the old image. If the old
+  version does not come up healthy, the gate leaves the container stopped (never the
+  new version on old data) and says so.
 
 ## Warnings
 
-On gate start, and in `status`, Bosun warns for each watched container that:
+- A backup larger than `BOSUN_BACKUP_WARN_SIZE` (default `10GB`) adds a warning to that
+  update's note one time only: "backup for jellyfin is 180 GB, expect long downtime".
+- `status` shows the last backup size for each container with backups on.
+- `rollback show <name> --with-data` says the restore helper runs as root, with no
+  network, and only sees that app's folders.
 
-- has `bosun.backup=true` and runs as root: "backup helper for postgres will run as
-  root (no network, only its own volumes)",
-- has `bosun.backup=true` and volumes over `BOSUN_BACKUP_WARN_SIZE` (default `10GB`):
-  "backup for jellyfin is 180 GB, expect long downtime".
-
-These warnings go out as a note one time only. There is no confirm step, because the
-user already chose these with a label.
+There is no confirm step for updates, because the user already chose backups with a
+label.
 
 ## Settings
 
@@ -220,7 +234,7 @@ user already chose these with a label.
 |---|---|---|
 | `BOSUN_SCHEDULE` | `0 4 * * *` | Cron string for rounds. |
 | `BOSUN_NOTIFY_FILE` | `/etc/bosun/notify.txt` | File with Shoutrrr URLs, one per line. A file, not an env var, because the URLs hold tokens and env vars show in `docker inspect`. Works with Docker secrets. |
-| `BOSUN_BACKUP_DIR` | none | Host folder for backups. Needed if any container uses `bosun.backup`. |
+| `BOSUN_BACKUP_DIR` | `/var/lib/bosun-backups` | Backup folder inside the gate (the `bosun-backups` volume). To use a host folder, mount it here and `chown 65532` it first. Must not be under `/run/bosun` or `/etc/bosun`. |
 | `BOSUN_BACKUP_WARN_SIZE` | `10GB` | Size that triggers the long-downtime warning. |
 | Registry logins | none | Mount a Docker `config.json` at `/etc/bosun/docker/config.json`. Everything under `/etc/bosun` is passed to the updater read-only. |
 | `BOSUN_INSECURE_REGISTRIES` | none | Comma list of registries allowed over plain HTTP. |
@@ -392,7 +406,7 @@ docker exec -it bosun-gate bosun <command>
 
 | Command | Does |
 |---|---|
-| `status` | Watched containers, mode, backup on or off, root helper or not, backup size, last downtime, warnings. |
+| `status` | Watched containers, mode, backup on or off, last backup size, last downtime. |
 | `check --dry-run` | Run a round now, but only print what it would do. |
 | `check` | Run a round now. Refuses if a round is running. |
 | `rollback ls` | Containers that can go back: now, back to, when updated, data backup and size. |
@@ -453,6 +467,9 @@ Every error says what to do next. For example: "No old version kept for nginx. R
   `--with-data` is used with a backup.
 - Updates with backups have longer downtime, because the app stays stopped during the
   copy.
+- Do not close the terminal during `rollback --with-data`. If the restore is cut off,
+  the app stays stopped with partial data; run the same command again.
+- Mounts nested inside another backed-up mount are copied twice.
 
 ## Not in v1
 
