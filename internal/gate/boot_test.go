@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -34,6 +35,7 @@ func TestUpdaterBodyIsLockedDown(t *testing.T) {
 	}
 	for _, want := range []string{
 		`"Image":"sha256:img"`,
+		`"User":"65532:65532"`,
 		`"bosun-run:/run/bosun"`,
 		`"/srv/bosun/notify.txt:/etc/bosun/notify.txt:ro"`,
 		`"CapDrop":["ALL"]`,
@@ -266,4 +268,68 @@ func fake(t *testing.T, h http.HandlerFunc) *docker.Client {
 	go srv.Serve(l)
 	t.Cleanup(func() { srv.Close() })
 	return docker.New(p)
+}
+
+// recoverFake is a swap cut off after the new container started: old-id is
+// stopped under a temp name and new-id holds the name app.
+func recoverFake(newRunning bool, health string) *dockerFake {
+	f := swapFake(newRunning)
+	f.containers["app"] = newCtr(true, "")
+	f.containers["new-id"] = newCtr(newRunning, health)
+	return f
+}
+
+func recoverApp(t *testing.T, g *Gate, e state.Entry, digest string) *state.State {
+	t.Helper()
+	setEntry(t, g, "app", e, state.Pending{Name: "app", OldID: "old-id", TmpName: "app-bosun-x", Digest: digest})
+	if err := g.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	st, err := state.Read(g.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Pending) != 0 || len(st.Events) != 1 {
+		t.Fatalf("state = %+v, want nothing pending and one event", st)
+	}
+	return st
+}
+
+func TestRecoverRevertsNewThatFailsTheHealthWait(t *testing.T) {
+	f := recoverFake(false, "") // running at first look, stopped at the health wait
+	g := f.gate(t)
+	st := recoverApp(t, g, state.Entry{}, "sha256:d2")
+	for _, c := range []string{"DELETE /containers/new-id?force=1&v=0", "POST /containers/old-id/rename?name=app", "POST /containers/old-id/start", retagOld} {
+		if !f.called(c) {
+			t.Errorf("missing %s; calls: %v", c, f.calls)
+		}
+	}
+	if !strings.Contains(st.Events[0].Message, "old version is back") || !slices.Contains(st.Entry("app").Skip, "sha256:d2") {
+		t.Errorf("state = %+v, want the old version back and d2 skipped", st)
+	}
+}
+
+func TestRecoverKeepsNewThatPassesTheHealthWait(t *testing.T) {
+	f := recoverFake(true, "healthy")
+	g := f.gate(t)
+	st := recoverApp(t, g, state.Entry{}, "sha256:d2")
+	if !f.called("DELETE /containers/old-id?force=1&v=0") || !f.called("POST /images/sha256:old/tag?repo=bosun/prev/app&tag=old") {
+		t.Errorf("old container not removed or old image not kept; calls: %v", f.calls)
+	}
+	e := st.Entry("app")
+	if !strings.Contains(st.Events[0].Message, "was kept") || e.Prev != "bosun/prev/app:old" || e.UpdatedAt.IsZero() {
+		t.Errorf("state = %+v %+v, want the new version kept with a rollback record", st, e)
+	}
+}
+
+// A cut-off rollback that is kept must skip the version it left, or the next
+// round would update straight back to it.
+func TestRecoverKeptRollbackSkipsTheVersionItLeft(t *testing.T) {
+	f := recoverFake(true, "healthy")
+	g := f.gate(t)
+	st := recoverApp(t, g, state.Entry{Prev: "bosun/prev/app:abc"}, "")
+	e := st.Entry("app")
+	if e.Prev != "" || !slices.Contains(e.Skip, "sha256:d1") || !f.called("DELETE /images/bosun/prev/app:abc") {
+		t.Errorf("entry = %+v, want d1 skipped and no rollback record; calls: %v", e, f.calls)
+	}
 }

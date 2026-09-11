@@ -1,4 +1,5 @@
-// Package state is the gate's small state file, /run/bosun/state.json.
+// Package state is the gate's small state file, /var/lib/bosun/state.json, in
+// a folder only the gate has.
 // Docker labels cannot change after a container is made, so the skip list,
 // rollback records and in-progress swaps live here. Only the gate writes it.
 package state
@@ -33,6 +34,7 @@ type Pending struct {
 	Name    string `json:"name"`
 	OldID   string `json:"old_id"`
 	TmpName string `json:"tmp_name"`
+	Digest  string `json:"digest,omitempty"` // the version an update goes to; empty for a rollback
 }
 
 // Event waits here until the updater collects it and sends it as a note.

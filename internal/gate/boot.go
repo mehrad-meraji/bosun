@@ -3,15 +3,18 @@ package gate
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
+	"time"
 
 	"github.com/mehrad-meraji/bosun/internal/docker"
 	"github.com/mehrad-meraji/bosun/internal/state"
 )
 
 // Recover finishes swaps that were cut off by a crash or power loss. A new
-// container that runs and is healthy is kept. Otherwise the old one comes
-// back. Each case leaves an event for the updater to send as a note.
+// container that runs and passes the same health wait as an update is kept.
+// Otherwise the old one comes back and the new version goes on the skip
+// list. Each case leaves an event for the updater to send as a note.
 func (g *Gate) Recover(ctx context.Context) error {
 	f, st, err := state.Open(g.Dir, true)
 	if err != nil {
@@ -21,7 +24,7 @@ func (g *Gate) Recover(ctx context.Context) error {
 	// Keep only the records whose recovery failed; remove successful ones
 	var failed []state.Pending
 	for _, p := range st.Pending {
-		msg, err := g.recoverOne(ctx, p)
+		msg, err := g.recoverOne(ctx, st, p)
 		if err != nil {
 			msg = fmt.Sprintf("%s: crash recovery failed: %v. The old container may be stopped as %s: rename it back to %s and start it, then restart bosun-gate.", p.Name, err, p.TmpName, p.Name)
 			failed = append(failed, p)
@@ -32,9 +35,9 @@ func (g *Gate) Recover(ctx context.Context) error {
 	return f.Save(st)
 }
 
-func (g *Gate) recoverOne(ctx context.Context, p state.Pending) (string, error) {
+func (g *Gate) recoverOne(ctx context.Context, st *state.State, p state.Pending) (string, error) {
 	// Check if the old container still exists
-	_, oldErr := g.D.Inspect(ctx, p.OldID)
+	old, oldErr := g.D.Inspect(ctx, p.OldID)
 	if oldErr != nil && !docker.IsNotFound(oldErr) {
 		return "", oldErr
 	}
@@ -62,12 +65,15 @@ func (g *Gate) recoverOne(ctx context.Context, p state.Pending) (string, error) 
 	case err != nil && !docker.IsNotFound(err):
 		return "", err
 	case err == nil && cur.ID == p.OldID:
-		// Stopped or crashed before the rename. Nothing changed but the stop.
+		// Stopped or crashed before the rename. Nothing changed but the stop
+		// and the tag, which the pull or rollback moved.
+		g.retag(ctx, old.Image, old.Config.Image)
 		return p.Name + ": an update was cut off before it changed anything; the container is running again", g.D.Start(ctx, p.OldID)
-	case err == nil && cur.State.Running && (cur.State.Health == nil || cur.State.Health.Status == "healthy"):
+	case err == nil && cur.State.Running && g.waitHealthy(ctx, cur.ID, timeoutOf(cur)) == nil:
 		if err := g.D.Remove(ctx, p.OldID, true); err != nil && !docker.IsNotFound(err) {
 			return "", err
 		}
+		g.kept(ctx, st.Entry(p.Name), p, old.Image)
 		return p.Name + ": an update was cut off; the new version is running and was kept", nil
 	case err == nil:
 		if err := g.D.Remove(ctx, cur.ID, true); err != nil {
@@ -77,7 +83,34 @@ func (g *Gate) recoverOne(ctx context.Context, p state.Pending) (string, error) 
 	if err := g.D.Rename(ctx, p.OldID, p.Name); err != nil {
 		return "", err
 	}
+	if p.Digest != "" {
+		st.Entry(p.Name).AddSkip(p.Digest)
+	}
+	g.retag(ctx, old.Image, old.Config.Image)
 	return p.Name + ": an update was cut off; the old version is back", g.D.Start(ctx, p.OldID)
+}
+
+// kept does the bookkeeping for a cut-off swap whose new container stays,
+// as Update or Rollback would have done.
+func (g *Gate) kept(ctx context.Context, e *state.Entry, p state.Pending, oldImage string) {
+	if p.Digest == "" {
+		// A rollback: skip the version it left, and nothing is kept to roll back to.
+		if img, err := g.D.InspectImage(ctx, oldImage); err == nil {
+			for _, d := range digestsOf(img) {
+				e.AddSkip(d)
+			}
+		}
+		if e.Prev != "" {
+			_ = g.D.RemoveImage(ctx, e.Prev)
+		}
+		e.Prev, e.UpdatedAt = "", time.Now().UTC()
+		return
+	}
+	prev, err := g.keep(ctx, p.Name, oldImage, e.Prev)
+	if err != nil {
+		log.Printf("%s: could not keep the old image for rollback: %v", p.Name, err)
+	}
+	e.Prev, e.UpdatedAt = prev, time.Now().UTC()
 }
 
 // SpawnUpdater starts Bosun's updater container. It clears any old one first.
@@ -124,6 +157,7 @@ func updaterBody(self *docker.Container, dir string) map[string]any {
 	}
 	return map[string]any{
 		"Image":  self.Image,
+		"User":   "65532:65532", // distroless nonroot, the owner of gate.sock
 		"Cmd":    []string{"updater"},
 		"Env":    env,
 		"Labels": map[string]string{LabelManaged: "bosun-gate"},

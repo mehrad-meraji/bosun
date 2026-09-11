@@ -76,6 +76,9 @@ func (g *Gate) List(ctx context.Context) ([]Watched, error) {
 	out := []Watched{}
 	for _, s := range sums {
 		c, err := g.D.Inspect(ctx, s.ID)
+		if docker.IsNotFound(err) {
+			continue // removed since the list call
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -108,6 +111,9 @@ func (g *Gate) Update(ctx context.Context, name, digest, auth string) (Result, e
 	if c.Config.Labels[LabelMode] == "notify" {
 		return Result{}, refuse("%s is notify-only", name)
 	}
+	if !c.State.Running {
+		return Result{}, refuse("%s is not running; bosun only updates running containers", name)
+	}
 	f, st, err := state.Open(g.Dir, true)
 	if err != nil {
 		return Result{}, err
@@ -127,14 +133,19 @@ func (g *Gate) Update(ctx context.Context, name, digest, auth string) (Result, e
 	if !slices.Contains(digestsOf(img), digest) {
 		return Result{}, fmt.Errorf("%s: pulled %s but it is not %s (the tag moved?); skipped this round", name, ref, digest)
 	}
+	if img.ID == c.Image {
+		return Result{Status: StatusDone, Message: fmt.Sprintf("%s: already running %s", name, ref)}, nil
+	}
 	// From here on, finish even if the caller hangs up. A half-done swap is worse.
 	ctx = context.WithoutCancel(ctx)
-	res, err := g.swap(ctx, f, st, c, ref)
+	res, err := g.swap(ctx, f, st, c, ref, digest)
 	if err != nil {
 		return Result{}, err
 	}
 	if res.Status == StatusReverted {
 		e.AddSkip(digest)
+		g.retag(ctx, c.Image, ref)
+		res.Message += fmt.Sprintf(". The new version is on the skip list; `bosun skip clear %s` allows it again", name)
 		return res, f.Save(st)
 	}
 	prev, err := g.keep(ctx, name, c.Image, e.Prev)
@@ -170,15 +181,22 @@ func (g *Gate) Rollback(ctx context.Context, name string) (Result, error) {
 		return Result{}, fmt.Errorf("retag %s: %w", e.Prev, err)
 	}
 	ctx = context.WithoutCancel(ctx)
-	res, err := g.swap(ctx, f, st, c, ref)
+	// Unless the rollback works, point the tag back at the current image.
+	ok := false
+	defer func() {
+		if !ok {
+			g.retag(ctx, c.Image, ref)
+		}
+	}()
+	res, err := g.swap(ctx, f, st, c, ref, "")
 	if err != nil {
 		return Result{}, err
 	}
 	if res.Status == StatusReverted {
-		_ = g.D.Tag(ctx, c.Image, repo, tag)
 		res.Message = fmt.Sprintf("%s: the old version did not come up healthy; the current version is kept", name)
 		return res, nil
 	}
+	ok = true
 	for _, d := range digestsOf(cur) {
 		e.AddSkip(d)
 	}
@@ -191,8 +209,9 @@ func (g *Gate) Rollback(ctx context.Context, name string) (Result, error) {
 
 // swap replaces old with a new container running ref, then waits for it to
 // be healthy. If anything fails after the old one stops, it puts the old one
-// back and returns StatusReverted.
-func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *docker.Container, ref string) (Result, error) {
+// back and returns StatusReverted. digest is the version an update goes to,
+// or "" for a rollback; crash recovery reads it.
+func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *docker.Container, ref, digest string) (Result, error) {
 	name := strings.TrimPrefix(old.Name, "/")
 	img, err := g.D.InspectImage(ctx, old.Image)
 	if err != nil {
@@ -203,7 +222,7 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 		return Result{}, fmt.Errorf("%s: build the new container: %w", name, err)
 	}
 
-	p := state.Pending{Name: name, OldID: old.ID, TmpName: name + "-bosun-" + randHex()}
+	p := state.Pending{Name: name, OldID: old.ID, TmpName: name + "-bosun-" + randHex(), Digest: digest}
 	st.Pending = append(st.Pending, p)
 	if err := f.Save(st); err != nil {
 		return Result{}, err
@@ -224,7 +243,9 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 		return Result{}, fmt.Errorf("%s: stop: %w", name, err)
 	}
 	if err := g.D.Rename(ctx, old.ID, p.TmpName); err != nil {
-		_ = g.D.Start(ctx, old.ID)
+		if serr := g.D.Start(ctx, old.ID); serr != nil {
+			return Result{}, fmt.Errorf("%s: rename: %v, and restarting it failed: %v. %s is stopped. Start it with: docker start %s", name, err, serr, name, name)
+		}
 		return Result{}, fmt.Errorf("%s: rename: %w", name, err)
 	}
 	newID, err := g.D.Create(ctx, name, body)
@@ -236,9 +257,12 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 		err = g.waitHealthy(ctx, newID, timeoutOf(old))
 	}
 	if err != nil {
-		if rerr := g.revert(ctx, old.ID, newID, name); rerr != nil {
+		if renamed, rerr := g.revert(ctx, old.ID, newID, name); rerr != nil {
 			// revert failed; keep Pending in state so Recover can fix it on next gate start
 			keepPending = true
+			if renamed {
+				return Result{}, fmt.Errorf("%s: new version failed (%v) and starting the old one failed: %w. %s is stopped; start it with: docker start %s", name, err, rerr, name, name)
+			}
 			return Result{}, fmt.Errorf("%s: new version failed (%v) and putting the old one back failed: %w. The old container is stopped as %s; restart bosun-gate to recover it, or rename it back to %s and start it", name, err, rerr, p.TmpName, name)
 		}
 		return Result{Status: StatusReverted, Downtime: time.Since(t0),
@@ -251,16 +275,26 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 		Message: fmt.Sprintf("%s: now running %s (down %s)", name, ref, down.Round(100*time.Millisecond))}, nil
 }
 
-func (g *Gate) revert(ctx context.Context, oldID, newID, name string) error {
+// revert removes the new container and puts the old one back. renamed says
+// the old one already has its name again, so only its start failed.
+func (g *Gate) revert(ctx context.Context, oldID, newID, name string) (renamed bool, err error) {
 	if newID != "" {
 		if err := g.D.Remove(ctx, newID, true); err != nil && !docker.IsNotFound(err) {
-			return err
+			return false, err
 		}
 	}
 	if err := g.D.Rename(ctx, oldID, name); err != nil {
-		return err
+		return false, err
 	}
-	return g.D.Start(ctx, oldID)
+	return true, g.D.Start(ctx, oldID)
+}
+
+// retag points ref back at image, so the local tag matches what runs.
+func (g *Gate) retag(ctx context.Context, image, ref string) {
+	repo, tag := docker.SplitRef(ref)
+	if err := g.D.Tag(ctx, image, repo, tag); err != nil {
+		log.Printf("point %s back at %s: %v", ref, image, err)
+	}
 }
 
 func (g *Gate) waitHealthy(ctx context.Context, id string, timeout time.Duration) error {

@@ -74,3 +74,6 @@ docker exec -it bosun-gate bosun help rollback
 - Bosun recreates containers made by compose outside of compose. A later
   `docker compose up` may recreate them again. That is harmless.
 - Bosun does not update itself yet. It needs Docker 25 or newer.
+- If the Docker daemon restarts in the middle of an update, a container with
+  `restart: always` can start twice (old and new) until Bosun recovers. Prefer
+  `restart: unless-stopped`.
