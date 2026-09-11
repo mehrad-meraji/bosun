@@ -85,6 +85,10 @@ objects with fixed fields. Unknown fields are refused.
 | `list()` | Returns watched containers: name, image ref, local digest, labels, skip list. |
 | `update(name, digest, registryAuth)` | Runs the full update sequence for one container. Returns the result. |
 | `events()` | Returns and clears queued events, such as the result of a crash recovery. |
+| `skipClear(name)` | Removes a container's versions from the skip list. Only for the control server link (see "Control server link"). |
+
+With the control server link, the `list()` reply also gives the Docker host name, and
+the `update` reply also gives a `steps` list.
 
 The gate has no network, so it cannot send notes. Results come back to the updater in
 the `update` reply. Events that happen when no call is open (crash recovery on gate
@@ -92,7 +96,7 @@ start) wait in a small queue until the updater calls `events()`.
 
 The CLI commands (`status`, `rollback`, `skip`, `check`) run inside the gate container
 with `docker exec`, so they call Docker directly. The gate daemon and the CLI share one
-lock file in `/run/bosun`. Only one of them changes containers or the state file at a
+lock file in `/var/lib/bosun`. Only one of them changes containers or the state file at a
 time. A `rollback` during a round is refused, like a second `check`.
 
 Gate and updater run as the same non-root user ID, so only they can open `gate.sock`
@@ -151,8 +155,9 @@ with a new `CMD` would be ignored. So the gate:
 ## State
 
 Docker labels cannot change after a container is made. So Bosun keeps a small state
-file in the shared volume (`/run/bosun/state.json`), written only by the gate. It
-holds:
+file, `/var/lib/bosun/state.json`, in its own `bosun-state` volume. Only the gate mounts
+that volume. The updater never gets it, so a hacked updater cannot forge crash records.
+The shared `/run/bosun` volume holds only the two sockets. It holds:
 
 - the kept old image per container,
 - the skip list,
@@ -254,6 +259,129 @@ Notes go out for:
 
 A failed note is logged only. It never blocks an update.
 
+## Control server link
+
+Status: added 2026-09-11, after the core plan. Build it after the core works.
+
+Bosun can link to a control server, for example Sentinel. The link has two parts:
+**events** (Bosun tells the server what happened, as JSON) and **commands** (the
+server asks Bosun to do a small set of things). Both are off until you set
+`BOSUN_CONTROL_URL`.
+
+The main rule stays the same: **the gate has no network and opens no port.** The
+updater makes every call. It sends events out, and it asks the server for commands.
+The server never connects to Bosun.
+
+### Events (JSON)
+
+Notes are plain text for people. A server needs fixed fields. So, for each thing that
+makes a note, the updater also sends one JSON event:
+
+```
+POST {BOSUN_CONTROL_URL}/events
+Authorization: Bearer <token from BOSUN_CONTROL_TOKEN_FILE>
+Content-Type: application/json
+```
+
+```json
+{
+  "schema": 1,
+  "id": "0f8c2c1e-5b7a-4d0e-9a51-3c2d7e6f1a90",
+  "time": "2026-09-11T04:01:33Z",
+  "host": "worker-1",
+  "bosun_version": "0.2.0",
+  "type": "update.rolled_back",
+  "container": "redis",
+  "image": "redis:7.4",
+  "from_digest": "sha256:b20c...",
+  "to_digest": "sha256:9ae1...",
+  "downtime_ms": 38000,
+  "backup": null,
+  "steps": [
+    { "name": "pull", "status": "ok", "ms": 6200 },
+    { "name": "stop", "status": "ok", "ms": 1100 },
+    { "name": "backup", "status": "skipped", "detail": "bosun.backup is off" },
+    { "name": "start", "status": "ok", "ms": 800 },
+    { "name": "health", "status": "failed", "ms": 60000, "detail": "restarted 3 times, exit code 1" },
+    { "name": "rollback", "status": "ok", "ms": 1300 },
+    { "name": "skip", "status": "ok", "detail": "sha256:9ae1... added to the skip list" }
+  ],
+  "reason": "health check failed",
+  "command_id": null
+}
+```
+
+Event types: `update.done`, `update.rolled_back`, `update.failed` (nothing was
+stopped), `version.available` (notify mode), `gate.refused`, `registry.failing`,
+`recovery`, `warning`, `command.result`.
+
+- `id` is new for each event. The server uses it to drop repeats.
+- `host` comes from the gate's `list()` reply. The gate reads it once from Docker's
+  host name. `BOSUN_HOST` overrides it.
+- `steps` come from the gate. The `update` reply gets a `steps` list with name, status,
+  time and a short detail for each step of the update sequence.
+- `command_id` is set when a command caused the event.
+- The body never holds registry logins, notify URLs or env vars.
+
+Sending rules:
+
+- The updater tries 3 times, waiting 5 s, 30 s, then 2 min. Then it drops the event and
+  logs it. Events wait in memory only, so a restart loses events that are not sent.
+  The next round still works.
+- A failed event never blocks an update. Same rule as notes.
+- Notes still go out as before. Events do not replace them.
+
+### Commands (pull, no open port)
+
+When `BOSUN_CONTROL_COMMANDS=true`, the updater asks the server for commands every
+`BOSUN_CONTROL_POLL` (default `60s`):
+
+```
+GET {BOSUN_CONTROL_URL}/commands?host=worker-1
+Authorization: Bearer <token>
+```
+
+The reply is a JSON list. Each command has fixed fields. Unknown fields or unknown
+commands are refused and logged, and they get a `command.result` event with
+`status: refused`.
+
+| Command | Fields | Does |
+|---|---|---|
+| `check` | `id` | Runs a round now. If a round is running, the result is `busy`. |
+| `skip_clear` | `id`, `container` | Removes that container's versions from the skip list. It does not start an update. Send `check` after it to try again. |
+
+That is the full list. On purpose, there is **no remote `update`, `rollback` or
+restore**:
+
+- `check` only does what the next cron round would do.
+- `skip_clear` only lets a round try a version again. If that version is still bad, the
+  health check rolls it back again.
+- So a hacked server can make Bosun do early rounds and retry a known-bad version. It
+  cannot pick an image, update a `notify` container, roll back, or touch data.
+
+How a command runs:
+
+1. The updater reads the reply. It keeps only commands with an `id` it has not seen in
+   the last 24 hours. This stops a replay from running a command twice.
+2. `check` runs in the updater, like a cron round.
+3. `skip_clear` goes to the gate as a new typed RPC call, `skipClear(name)`. The state
+   file belongs to the gate, so only the gate changes it. The gate uses the same lock as
+   the CLI.
+4. The updater sends a `command.result` event with the `command_id` and one of `done`,
+   `busy`, `refused` or `failed`. The server uses it to remove the command.
+
+A command runs up to one poll interval late. That is the cost of having no open port.
+
+### Link settings (on the gate, passed to the updater)
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `BOSUN_CONTROL_URL` | none | Base URL of the control server. Off when not set. HTTPS only, unless `BOSUN_CONTROL_INSECURE=true` (for a server on your own LAN). |
+| `BOSUN_CONTROL_TOKEN_FILE` | `/etc/bosun/control-token` | File with the bearer token. A file, not an env var, for the same reason as the notify file. |
+| `BOSUN_CONTROL_COMMANDS` | `false` | Ask the server for commands. Events work without it. |
+| `BOSUN_CONTROL_POLL` | `60s` | How often to ask for commands. Lowest value `15s`. |
+| `BOSUN_HOST` | Docker host name | Host name sent in events and command polls. |
+
 ## CLI
 
 Run inside the gate:
@@ -294,6 +422,8 @@ Every error says what to do next. For example: "No old version kept for nginx. R
 | Gate refuses a request | Log loudly. Note. |
 | Note fails | Log only. |
 | Second round while one runs | Refused with "a round is running, try again later". |
+| Control server down | Events: 3 tries, then dropped and logged. Commands: try again at the next poll. Updates go on. |
+| Bad command from the control server | Refused, logged, and a `command.result` event with `refused`. |
 
 ## Testing
 
@@ -304,6 +434,10 @@ Every error says what to do next. For example: "No old version kept for nginx. R
 - **Recreate rules**: tests that image defaults are not copied, that user overrides
   are kept, and that anonymous volumes and all networks carry over.
 - **Fuzz tests** with Go's built-in fuzzing on the RPC message reader.
+- **Control server link**: table tests that the command reader refuses unknown
+  commands and unknown fields, and drops a repeated `id`. A golden test for the event
+  JSON. A test that nothing is sent when `BOSUN_CONTROL_URL` is not set. A fuzz test on
+  the command reader.
 - **Full-flow tests** on real Docker in GitHub Actions, with a local `registry:2`:
   - push v1, run it, push v2: it updates;
   - push a broken v3 that exits at once: it rolls back and skips v3;
@@ -327,5 +461,6 @@ Every error says what to do next. For example: "No old version kept for nginx. R
 - Version jumps (16 to 17, semver rules).
 - Registry credential helpers, so no AWS ECR or Google GCR short-lived logins.
 - Keeping more than one old version.
-- A rollback button in notes (needs an open port).
+- A rollback button in notes (needs an open port). The control server link can clear
+  the skip list and start a round, but it cannot roll back.
 - Rootless Docker and Podman. Podman users have `podman auto-update`.
