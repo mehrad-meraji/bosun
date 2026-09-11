@@ -26,6 +26,7 @@ func TestUpdaterBodyIsLockedDown(t *testing.T) {
 		{Type: "bind", Source: "/var/run/docker.sock", Destination: "/etc/bosun/sneaky"},
 		{Type: "bind", Source: "/srv/data", Destination: "/data"},
 		{Type: "volume", Name: "bosun-state", Destination: "/var/lib/bosun"},
+		{Type: "volume", Name: "bosun-backups", Destination: "/var/lib/bosun-backups"},
 	}
 	b, _ := json.Marshal(updaterBody(self, "/run/bosun"))
 	s := string(b)
@@ -48,7 +49,7 @@ func TestUpdaterBodyIsLockedDown(t *testing.T) {
 			t.Errorf("updater body lacks %s:\n%s", want, s)
 		}
 	}
-	for _, bad := range []string{"/srv/data", "SECRET=x", "PATH=/usr/bin", "bosun-state", "/var/lib/bosun"} {
+	for _, bad := range []string{"/srv/data", "SECRET=x", "PATH=/usr/bin", "bosun-state", "/var/lib/bosun", "bosun-backups", "/var/lib/bosun-backups"} {
 		if strings.Contains(s, bad) {
 			t.Errorf("updater body must not carry %s", bad)
 		}

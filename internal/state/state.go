@@ -26,7 +26,8 @@ type Entry struct {
 	Prev      string        `json:"prev,omitempty"` // local tag of the kept old image
 	UpdatedAt time.Time     `json:"updated_at,omitzero"`
 	Downtime  time.Duration `json:"downtime,omitempty"`
-	Skip      []string      `json:"skip,omitempty"` // digests never to update to
+	Skip      []string      `json:"skip,omitempty"`       // digests never to update to
+	WarnedBig bool          `json:"warned_big,omitempty"` // the big-backup warning went out once
 }
 
 // Pending is a swap in progress. If the gate dies mid-swap, Recover uses it.

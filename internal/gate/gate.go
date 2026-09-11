@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mehrad-meraji/bosun/internal/backup"
 	"github.com/mehrad-meraji/bosun/internal/docker"
 	"github.com/mehrad-meraji/bosun/internal/recreate"
 	"github.com/mehrad-meraji/bosun/internal/state"
@@ -25,6 +26,7 @@ const (
 	LabelMode    = "bosun.mode"
 	LabelTimeout = "bosun.health-timeout"
 	LabelManaged = "bosun.managed-by"
+	LabelBackup  = "bosun.backup"
 	UpdaterName  = "bosun-updater"
 
 	StatusDone     = "done"
@@ -39,6 +41,11 @@ type Gate struct {
 	RunDir string        // shared socket folder, /run/bosun; the only folder the updater gets
 	SelfID string        // the gate's own container ID (or its prefix); never touched
 	Poll   time.Duration // health poll interval; 0 means 1s
+
+	BackupDir   string // gate-only backup folder, /var/lib/bosun-backups; never given to the updater
+	WarnSize    int64  // a backup bigger than this gets a one-time warning; 0 means never
+	BackupSrc   string // BackupDir as Docker sees it (volume name or host path); found from the gate's mounts if empty
+	HelperImage string // image for the restore helper; the gate's own image if empty
 }
 
 // Watched is a container Bosun looks after.
@@ -48,12 +55,15 @@ type Watched struct {
 	Digests []string `json:"digests"`
 	Mode    string   `json:"mode"` // "update" or "notify"
 	Skip    []string `json:"skip"`
+	Backup  bool     `json:"backup"`
 }
 
 type Result struct {
-	Status   string        `json:"status"` // StatusDone or StatusReverted
-	Downtime time.Duration `json:"downtime"`
-	Message  string        `json:"message"`
+	Status      string        `json:"status"` // StatusDone or StatusReverted
+	Downtime    time.Duration `json:"downtime"`
+	Backup      time.Duration `json:"backup,omitempty"`       // time the backup took, inside Downtime
+	BackupBytes int64         `json:"backup_bytes,omitempty"` // size of the backup
+	Message     string        `json:"message"`
 }
 
 // RefusedError is a request the gate will not do. It means a bug or an attack.
@@ -95,7 +105,7 @@ func (g *Gate) List(ctx context.Context) ([]Watched, error) {
 		if mode != "notify" {
 			mode = "update"
 		}
-		out = append(out, Watched{Name: name, Ref: ref, Digests: digestsOf(img), Mode: mode, Skip: st.Entry(name).Skip})
+		out = append(out, Watched{Name: name, Ref: ref, Digests: digestsOf(img), Mode: mode, Skip: st.Entry(name).Skip, Backup: c.Config.Labels[LabelBackup] == "true"})
 	}
 	return out, nil
 }
@@ -138,7 +148,7 @@ func (g *Gate) Update(ctx context.Context, name, digest, auth string) (Result, e
 	}
 	// From here on, finish even if the caller hangs up. A half-done swap is worse.
 	ctx = context.WithoutCancel(ctx)
-	res, err := g.swap(ctx, f, st, c, ref, digest)
+	res, err := g.swap(ctx, f, st, c, ref, digest, c.Config.Labels[LabelBackup] == "true")
 	if err != nil {
 		return Result{}, err
 	}
@@ -153,6 +163,10 @@ func (g *Gate) Update(ctx context.Context, name, digest, auth string) (Result, e
 		log.Printf("%s: could not keep the old image for rollback: %v", name, err)
 	}
 	e.Prev, e.UpdatedAt, e.Downtime = prev, time.Now().UTC(), res.Downtime
+	if g.WarnSize > 0 && res.BackupBytes > g.WarnSize && !e.WarnedBig {
+		res.Message += fmt.Sprintf(". Warning: the backup of %s is %s, so its updates have long downtime", name, backup.FormatSize(res.BackupBytes))
+		e.WarnedBig = true
+	}
 	return res, f.Save(st)
 }
 
@@ -188,7 +202,7 @@ func (g *Gate) Rollback(ctx context.Context, name string) (Result, error) {
 			g.retag(ctx, c.Image, ref)
 		}
 	}()
-	res, err := g.swap(ctx, f, st, c, ref, "")
+	res, err := g.swap(ctx, f, st, c, ref, "", false)
 	if err != nil {
 		return Result{}, err
 	}
@@ -210,8 +224,9 @@ func (g *Gate) Rollback(ctx context.Context, name string) (Result, error) {
 // swap replaces old with a new container running ref, then waits for it to
 // be healthy. If anything fails after the old one stops, it puts the old one
 // back and returns StatusReverted. digest is the version an update goes to,
-// or "" for a rollback; crash recovery reads it.
-func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *docker.Container, ref, digest string) (Result, error) {
+// or "" for a rollback; crash recovery reads it. withBackup copies the old
+// container's mounts while it is stopped, before anything else changes.
+func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *docker.Container, ref, digest string, withBackup bool) (Result, error) {
 	name := strings.TrimPrefix(old.Name, "/")
 	img, err := g.D.InspectImage(ctx, old.Image)
 	if err != nil {
@@ -242,6 +257,19 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 	if err := g.D.Stop(ctx, old.ID); err != nil {
 		return Result{}, fmt.Errorf("%s: stop: %w", name, err)
 	}
+	var took time.Duration
+	var size int64
+	if withBackup {
+		b0 := time.Now()
+		m, err := g.takeBackup(ctx, old)
+		if err != nil {
+			if serr := g.D.Start(ctx, old.ID); serr != nil {
+				return Result{}, fmt.Errorf("%s: backup failed (%v), and restarting it failed: %v. %s is stopped. Start it with: docker start %s", name, err, serr, name, name)
+			}
+			return Result{}, fmt.Errorf("%s: backup failed, so no update: %w. The old version is running again", name, err)
+		}
+		took, size = time.Since(b0), m.Bytes()
+	}
 	if err := g.D.Rename(ctx, old.ID, p.TmpName); err != nil {
 		if serr := g.D.Start(ctx, old.ID); serr != nil {
 			return Result{}, fmt.Errorf("%s: rename: %v, and restarting it failed: %v. %s is stopped. Start it with: docker start %s", name, err, serr, name, name)
@@ -271,8 +299,12 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 	if err := g.D.Remove(ctx, old.ID, true); err != nil {
 		log.Printf("%s: remove old container %s: %v", name, p.TmpName, err)
 	}
-	return Result{Status: StatusDone, Downtime: down,
-		Message: fmt.Sprintf("%s: now running %s (down %s)", name, ref, down.Round(100*time.Millisecond))}, nil
+	msg := fmt.Sprintf("%s: now running %s (down %s)", name, ref, down.Round(100*time.Millisecond))
+	if withBackup {
+		msg = fmt.Sprintf("%s: now running %s (down %s, backup %s, %s)", name, ref,
+			down.Round(100*time.Millisecond), took.Round(100*time.Millisecond), backup.FormatSize(size))
+	}
+	return Result{Status: StatusDone, Downtime: down, Backup: took, BackupBytes: size, Message: msg}, nil
 }
 
 // revert removes the new container and puts the old one back. renamed says
