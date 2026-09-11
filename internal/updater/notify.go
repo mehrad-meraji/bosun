@@ -5,10 +5,17 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/nicholas-fedor/shoutrrr"
 )
+
+var urlRE = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s"']+`)
+
+func redact(s string) string {
+	return urlRE.ReplaceAllString(s, "<url>")
+}
 
 // LoadURLs reads Shoutrrr URLs, one per line. Blank lines and # comments are
 // skipped. A missing file means no notes.
@@ -38,7 +45,7 @@ func Sender(urls []string) func(string) {
 		for _, u := range urls {
 			if err := shoutrrr.Send(u, msg); err != nil {
 				scheme, _, _ := strings.Cut(u, ":")
-				log.Printf("note to %s failed: %s", scheme, strings.ReplaceAll(err.Error(), u, scheme+"://…"))
+				log.Printf("note to %s failed: %s", scheme, redact(err.Error()))
 			}
 		}
 	}

@@ -139,3 +139,26 @@ func TestLoadURLs(t *testing.T) {
 		t.Fatalf("missing file: %v, %v; want no URLs and no error", got, err)
 	}
 }
+
+func TestRedact(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{
+			input: `sending POST request to "https://hooks.slack.com/services/T1/B2/SECRET": dial tcp: timeout`,
+			want:  "dial tcp: timeout",
+		},
+		{
+			input: `locating service for URL "slack://tok/en": bad`,
+			want:  "bad",
+		},
+	}
+	for _, tt := range tests {
+		got := redact(tt.input)
+		if !strings.Contains(got, "SECRET") && !strings.Contains(got, "slack://tok") && strings.Contains(got, tt.want) {
+			continue
+		}
+		t.Errorf("redact(%q) = %q, missing expected %q or contains redacted secrets", tt.input, got, tt.want)
+	}
+}
