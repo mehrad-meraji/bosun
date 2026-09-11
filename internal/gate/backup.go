@@ -22,16 +22,26 @@ var errNoSpace = errors.New("not enough free space in the backup folder")
 const noSpaceHint = "; free space in the backup folder, or remove bosun.backup=true"
 
 // backupMounts are the mounts a backup copies: writable volumes and host
-// folders. Read-only mounts cannot change, so they need no copy.
+// folders. Read-only mounts cannot change, so they need no copy. Binds of
+// system folders are never backed up, so they are never restored either.
 // ponytail: sockets are skipped by name (*.sock); Docker cannot tar them.
 func backupMounts(c *docker.Container) []docker.Mount {
 	var out []docker.Mount
 	for _, m := range c.Mounts {
-		if m.RW && (m.Type == "volume" || m.Type == "bind") && !strings.HasSuffix(m.Source, ".sock") {
+		if m.RW && (m.Type == "volume" || (m.Type == "bind" && !systemFolder(m.Source))) && !strings.HasSuffix(m.Source, ".sock") {
 			out = append(out, m)
 		}
 	}
 	return out
+}
+
+func systemFolder(src string) bool {
+	src = filepath.Clean(src)
+	switch src {
+	case "/", "/run", "/var/run", "/var/lib/docker":
+		return true
+	}
+	return strings.HasPrefix(src, "/var/lib/docker/")
 }
 
 // backupPaths are name's backup folder and the temp folders beside it.

@@ -49,6 +49,11 @@ func TestBackupMounts(t *testing.T) {
 		{Type: "volume", Name: "ro", Destination: "/ro", RW: false},
 		{Type: "tmpfs", Destination: "/tmp", RW: true},
 		{Type: "bind", Source: "/var/run/docker.sock", Destination: "/var/run/docker.sock", RW: true},
+		{Type: "bind", Source: "/", Destination: "/host", RW: true},
+		{Type: "bind", Source: "/run/", Destination: "/r", RW: true},
+		{Type: "bind", Source: "/var/run", Destination: "/vr", RW: true},
+		{Type: "bind", Source: "/var/lib/docker", Destination: "/d", RW: true},
+		{Type: "bind", Source: "/var/lib/docker/volumes/x/_data", Destination: "/dv", RW: true},
 	}}
 	got := backupMounts(c)
 	if len(got) != 2 || got[0].Destination != "/v" || got[1].Destination != "/x" {
