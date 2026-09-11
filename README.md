@@ -78,8 +78,8 @@ docker exec -it bosun-gate bosun rollback postgres --with-data
 Data written since the backup is lost. The restore runs a short helper container
 from Bosun's own image. It runs as root, because it must delete files and keep file
 owners, but it has no network, a read-only root, only three powers (`CHOWN`,
-`DAC_OVERRIDE`, `FOWNER`), and it only sees that app's folders. Don't close the
-terminal during a restore.
+`DAC_OVERRIDE`, `FOWNER`). It only sees that app's folders and the backup folder
+(read-only). Don't close the terminal during a restore.
 
 To keep backups in a host folder instead, mount it at `/var/lib/bosun-backups` and
 give it to Bosun's user first: `sudo chown 65532:65532 /srv/bosun-backups`.

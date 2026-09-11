@@ -220,7 +220,7 @@ func rollbackShow(ctx context.Context, st *state.State, name string, withData bo
 	case withData:
 		fmt.Printf("With --with-data, the volumes go back to the backup from %s (%s). Data written since then is lost.\n",
 			ago(m.Time), backup.FormatSize(m.Bytes()))
-		fmt.Printf("A short helper container does this. It runs as root, with no network, and only sees %s's folders.\n", name)
+		fmt.Printf("A short helper container does this. It runs as root, with no network. It only sees %s's folders and the backup folder (read-only).\n", name)
 	case dataErr == nil:
 		fmt.Printf("Volumes are not changed. A data backup from %s is kept; add --with-data to put it back too.\n", ago(m.Time))
 	default:
