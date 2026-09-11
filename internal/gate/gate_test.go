@@ -1,6 +1,12 @@
 package gate
 
 import (
+	"context"
+	"encoding/json"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -80,4 +86,68 @@ func TestTimeoutOf(t *testing.T) {
 	if timeoutOf(c) != 60*time.Second {
 		t.Error("bad label must fall back to 60s")
 	}
+}
+
+func TestWatchedBadName(t *testing.T) {
+	// Test that bad names are refused without touching Docker (D is nil)
+	g := &Gate{D: nil, Dir: ""}
+	for _, badName := range []string{
+		"",                 // empty
+		"_web",             // starts with underscore
+		"-web",             // starts with dash
+		".web",             // starts with dot
+		"web/name",         // contains slash
+		"web?name",         // contains question mark
+		"a" + string(make([]byte, 200)), // too long
+	} {
+		_, _, err := g.watched(context.Background(), badName)
+		if err == nil || !isRefused(err) {
+			t.Errorf("watched(%q) should refuse, got %v", badName, err)
+		}
+	}
+}
+
+func TestWatchedNameIDMismatch(t *testing.T) {
+	// Test that using a container ID when a name is required is refused
+	c := fakeGate(t, func(w http.ResponseWriter, r *http.Request) {
+		// The request might be for abc123 (ID prefix used as name)
+		if r.URL.Path == "/v1.44/containers/abc123/json" {
+			// Return a container with a different name
+			resp := docker.Container{ID: "abc123def456", Name: "/web"}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+		http.Error(w, "not found", http.StatusNotFound)
+	})
+
+	// Using the ID prefix should be refused (doesn't match the actual name "web")
+	_, _, err := c.watched(context.Background(), "abc123")
+	if err == nil || !isRefused(err) {
+		t.Errorf("watched(id prefix) should refuse, got %v", err)
+	}
+}
+
+// fakeGate creates a Gate with a fake Docker server for testing.
+func fakeGate(t *testing.T, h http.HandlerFunc) *Gate {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "bg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	p := filepath.Join(dir, "d.sock")
+	l, err := net.Listen("unix", p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: h}
+	go srv.Serve(l)
+	t.Cleanup(func() { srv.Close() })
+	return &Gate{D: docker.New(p), Dir: dir}
+}
+
+func isRefused(err error) bool {
+	_, ok := err.(*RefusedError)
+	return ok
 }

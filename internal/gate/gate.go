@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -29,6 +30,8 @@ const (
 	StatusDone     = "done"
 	StatusReverted = "reverted"
 )
+
+var nameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`)
 
 type Gate struct {
 	D      *docker.Client
@@ -204,12 +207,6 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 	if err := f.Save(st); err != nil {
 		return Result{}, err
 	}
-	defer func() {
-		st.Pending = slices.DeleteFunc(st.Pending, func(q state.Pending) bool { return q == p })
-		if err := f.Save(st); err != nil {
-			log.Printf("save state: %v", err)
-		}
-	}()
 
 	t0 := time.Now()
 	if err := g.D.Stop(ctx, old.ID); err != nil {
@@ -229,13 +226,24 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 	}
 	if err != nil {
 		if rerr := g.revert(ctx, old.ID, newID, name); rerr != nil {
-			return Result{}, fmt.Errorf("%s: new version failed (%v) and putting the old one back failed: %w", name, err, rerr)
+			// revert failed; keep Pending in state so Recover can fix it on next gate start
+			return Result{}, fmt.Errorf("%s: new version failed (%v) and putting the old one back failed: %w. The old container is stopped as %s; restart bosun-gate to recover it, or rename it back to %s and start it", name, err, rerr, p.TmpName, name)
+		}
+		// revert succeeded; remove Pending
+		st.Pending = slices.DeleteFunc(st.Pending, func(q state.Pending) bool { return q == p })
+		if err := f.Save(st); err != nil {
+			log.Printf("save state: %v", err)
 		}
 		return Result{Status: StatusReverted, Downtime: time.Since(t0),
 			Message: fmt.Sprintf("%s: new version failed (%v); the old version is back", name, err)}, nil
 	}
 	if err := g.D.Remove(ctx, old.ID, true); err != nil {
 		log.Printf("%s: remove old container %s: %v", name, p.TmpName, err)
+	}
+	// successful swap; remove Pending
+	st.Pending = slices.DeleteFunc(st.Pending, func(q state.Pending) bool { return q == p })
+	if err := f.Save(st); err != nil {
+		log.Printf("save state: %v", err)
 	}
 	return Result{Status: StatusDone, Downtime: down,
 		Message: fmt.Sprintf("%s: now running %s (down %s)", name, ref, down.Round(100*time.Millisecond))}, nil
@@ -312,12 +320,18 @@ func (g *Gate) keep(ctx context.Context, name, imageID, before string) (string, 
 
 // watched loads a container the gate may change, or refuses.
 func (g *Gate) watched(ctx context.Context, name string) (*docker.Container, string, error) {
+	if !nameRE.MatchString(name) {
+		return nil, "", refuse("bad container name %q", name)
+	}
 	c, err := g.D.Inspect(ctx, name)
 	if docker.IsNotFound(err) {
 		return nil, "", refuse("no container named %q", name)
 	}
 	if err != nil {
 		return nil, "", err
+	}
+	if strings.TrimPrefix(c.Name, "/") != name {
+		return nil, "", refuse("%q is not a container name; use the name, not the ID", name)
 	}
 	if c.Config.Labels[LabelEnable] != "true" {
 		return nil, "", refuse("%s does not have %s=true", name, LabelEnable)
