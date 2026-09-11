@@ -97,13 +97,61 @@ func TestExtractRefusesClimbingOut(t *testing.T) {
 	}
 }
 
+func TestExtractRefusesChtimesFollowingSymlinks(t *testing.T) {
+	// Ensure Extract doesn't call Chtimes on a symlink to outside dest.
+	// Setup: a dir outside, a tar with "data/d" as dir and later as symlink to outside.
+	outside := t.TempDir()
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Record the outside dir's mtime before extraction.
+	oldTime := time.Unix(1600000000, 0)
+	if err := os.Chtimes(outside, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := t.TempDir()
+	tb := mkTar(t,
+		entry{name: "data/", typ: tar.TypeDir, mode: 0o755},
+		entry{name: "data/d", typ: tar.TypeDir, mode: 0o755},
+		// Later: replace the directory with a symlink to outside.
+		entry{name: "data/d", typ: tar.TypeSymlink, link: outside},
+	)
+
+	// Extract should either succeed or fail gracefully.
+	// But the outside dir's mtime must NOT change.
+	_ = Extract(bytes.NewReader(tb), dest)
+
+	// Check that outside dir's mtime is unchanged.
+	fi, err := os.Stat(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.ModTime() != oldTime {
+		t.Errorf("outside dir mtime changed to %v, want %v", fi.ModTime(), oldTime)
+	}
+}
+
 func TestCheckFindsBrokenTar(t *testing.T) {
-	tb := mkTar(t, entry{name: "data/a.txt", typ: tar.TypeReg, mode: 0o600, body: "hello world"})
+	// Build a tar with a dir, a 4096-byte all-zero file, and a small file.
+	// This tests edge case: tar with zero-filled file cut after it.
+	zeroFile := make([]byte, 4096)
+	tb := mkTar(t,
+		entry{name: "data/", typ: tar.TypeDir, mode: 0o755},
+		entry{name: "data/zeros.bin", typ: tar.TypeReg, mode: 0o600, body: string(zeroFile)},
+		entry{name: "data/final.txt", typ: tar.TypeReg, mode: 0o600, body: "last"},
+	)
+
+	// Full tar should pass
 	if err := Check(bytes.NewReader(tb)); err != nil {
 		t.Fatal(err)
 	}
-	if err := Check(bytes.NewReader(tb[:600])); err == nil {
-		t.Fatal("Check must fail on a cut-off tar")
+
+	// Check that it fails for every cut length from 1 to len(tb)-1
+	for cutLen := 1; cutLen < len(tb); cutLen++ {
+		if err := Check(bytes.NewReader(tb[:cutLen])); err == nil {
+			t.Fatalf("Check must fail on tar cut at length %d", cutLen)
+		}
 	}
 }
 

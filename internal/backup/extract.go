@@ -2,7 +2,6 @@ package backup
 
 import (
 	"archive/tar"
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -75,45 +74,92 @@ func checkFile(name string) error {
 	return Check(f)
 }
 
-// Check reads a whole tar, so a cut-off or broken file fails before a restore
-// deletes anything.
-func Check(r io.Reader) error {
-	data, err := io.ReadAll(r)
-	if err != nil {
-		return err
-	}
+// countReader tracks bytes read and keeps a rolling buffer of the last 1024 bytes.
+type countReader struct {
+	r    io.Reader
+	cnt  int64
+	last [1024]byte
+	pos  int
+}
 
-	// Tar files must be a multiple of 512 bytes and end with at least 1024 bytes of zeros (end marker).
-	if len(data)%512 != 0 {
-		return fmt.Errorf("tar size not a multiple of 512 bytes")
+func (c *countReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	// Keep rolling buffer of last 1024 bytes
+	for i := 0; i < n; i++ {
+		c.last[c.pos] = p[i]
+		c.pos = (c.pos + 1) % 1024
 	}
-	if len(data) < 1024 {
-		return fmt.Errorf("tar too small")
-	}
+	c.cnt += int64(n)
+	return n, err
+}
 
-	// Check for end marker (last 1024 bytes should be all zeros).
-	for i := len(data) - 1024; i < len(data); i++ {
-		if data[i] != 0 {
-			return fmt.Errorf("tar missing end marker")
+func (c *countReader) lastBytes() []byte {
+	if c.cnt < 1024 {
+		// Haven't read 1024 bytes yet; return what we have
+		if c.pos == 0 && c.cnt == 0 {
+			return nil
 		}
+		b := make([]byte, c.cnt)
+		if c.cnt <= int64(1024-c.pos) {
+			// Data is contiguous in buffer
+			copy(b, c.last[1024-int(c.cnt):])
+		} else {
+			// Data wraps around
+			copy(b, c.last[c.pos:])
+			copy(b[1024-c.pos:], c.last[:c.pos])
+		}
+		return b
 	}
+	// We've read >= 1024 bytes; return the last 1024
+	b := make([]byte, 1024)
+	copy(b, c.last[c.pos:])
+	copy(b[1024-c.pos:], c.last[:c.pos])
+	return b
+}
 
-	// Parse the tar to detect any structural errors in entries.
-	tr := tar.NewReader(bytes.NewReader(data))
+// roundUp512 returns n rounded up to the next 512-byte boundary.
+func roundUp512(n int64) int64 {
+	return (n + 511) / 512 * 512
+}
+
+// Check reads a whole tar, so a cut-off or broken file fails before a restore
+// deletes anything. It streams the tar in constant memory.
+func Check(r io.Reader) error {
+	cr := &countReader{r: r}
+	tr := tar.NewReader(cr)
+	var end int64 // expected byte position after current entry's data
+
 	for {
-		_, err := tr.Next()
+		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			break
+			// Verify we read enough bytes (all entries plus 1024-byte end marker)
+			if cr.cnt < end+1024 {
+				return fmt.Errorf("tar file is cut off")
+			}
+			// Verify last 1024 bytes are all zeros (end marker)
+			last := cr.lastBytes()
+			if len(last) < 1024 {
+				return fmt.Errorf("tar file is cut off")
+			}
+			for _, b := range last {
+				if b != 0 {
+					return fmt.Errorf("tar file is cut off")
+				}
+			}
+			return nil
 		}
 		if err != nil {
 			return err
 		}
+
+		// Set expected end position: current count + rounded-up header size
+		end = cr.cnt + roundUp512(h.Size)
+
+		// Read (and discard) the entry body
 		if _, err := io.Copy(io.Discard, tr); err != nil {
 			return err
 		}
 	}
-
-	return nil
 }
 
 // Clear deletes everything inside dir but keeps dir, which is a mount point.
@@ -137,7 +183,8 @@ func Clear(dir string) error {
 // ponytail: devices, fifos and sockets are skipped; app volumes rarely hold them.
 func Extract(r io.Reader, dest string) error {
 	type dirTime struct {
-		path string
+		rel string    // relative path (for safeParent check)
+		path string   // absolute path
 		t    time.Time
 	}
 	var dirs []dirTime
@@ -173,7 +220,7 @@ func Extract(r io.Reader, dest string) error {
 			if err := os.MkdirAll(p, 0o700); err != nil {
 				return err
 			}
-			dirs = append(dirs, dirTime{p, h.ModTime})
+			dirs = append(dirs, dirTime{rel, p, h.ModTime})
 		case tar.TypeReg:
 			f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
 			if err != nil {
@@ -210,8 +257,14 @@ func Extract(r io.Reader, dest string) error {
 		}
 	}
 	// Folder times last, because writing inside a folder changes its time.
+	// Only set times if the path is safe and is still a directory (not replaced by a symlink).
 	for i := len(dirs) - 1; i >= 0; i-- {
-		_ = os.Chtimes(dirs[i].path, dirs[i].t, dirs[i].t)
+		d := dirs[i]
+		if safeParent(dest, d.rel) == nil {
+			if fi, err := os.Lstat(d.path); err == nil && fi.IsDir() {
+				_ = os.Chtimes(d.path, d.t, d.t)
+			}
+		}
 	}
 	return nil
 }
