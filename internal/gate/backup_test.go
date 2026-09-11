@@ -39,6 +39,8 @@ func backupFake(t *testing.T, newRunning bool) (*dockerFake, *Gate) {
 	return f, g
 }
 
+func exists(p string) bool { _, err := os.Stat(p); return err == nil }
+
 func TestBackupMounts(t *testing.T) {
 	c := &docker.Container{Mounts: []docker.Mount{
 		{Type: "volume", Name: "v", Destination: "/v", RW: true},
@@ -64,8 +66,14 @@ func TestTakeBackupReplacesTheOldOne(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := g.takeBackup(context.Background(), c)
+	m, commit, err := g.takeBackup(context.Background(), c)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if old, err := backup.ReadManifest(dir); err != nil || old.Image != "sha256:older" {
+		t.Fatalf("the old backup must stay until commit: %+v %v", old, err)
+	}
+	if err := commit(); err != nil {
 		t.Fatal(err)
 	}
 	if m.Image != "sha256:old" || len(m.Mounts) != 1 || m.Mounts[0].Dest != "/data" || m.Mounts[0].Bytes != int64(len(f.containers["old-id/archive"])) {
@@ -77,7 +85,8 @@ func TestTakeBackupReplacesTheOldOne(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "junk")); err == nil {
 		t.Error("the old backup was not replaced")
 	}
-	for _, left := range []string{dir + ".new", dir + ".old"} {
+	_, tmp, old := g.backupPaths("app")
+	for _, left := range []string{tmp, old} {
 		if _, err := os.Stat(left); err == nil {
 			t.Errorf("%s left behind", left)
 		}
@@ -91,13 +100,13 @@ func TestTakeBackupFailureKeepsTheOldOne(t *testing.T) {
 	os.MkdirAll(dir, 0o700)
 	backup.WriteManifest(dir, &backup.Manifest{Image: "sha256:older"})
 	c, _ := g.D.Inspect(context.Background(), "old-id")
-	if _, err := g.takeBackup(context.Background(), c); err == nil {
+	if _, _, err := g.takeBackup(context.Background(), c); err == nil {
 		t.Fatal("want an error")
 	}
 	if m, err := backup.ReadManifest(dir); err != nil || m.Image != "sha256:older" {
 		t.Errorf("old backup changed: %+v %v", m, err)
 	}
-	if _, err := os.Stat(dir + ".new"); err == nil {
+	if _, tmp, _ := g.backupPaths("app"); exists(tmp) {
 		t.Error("partial copy left behind")
 	}
 }
@@ -115,7 +124,11 @@ func TestTakeBackupLeavesOtherBackupsAlone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := g.takeBackup(context.Background(), c); err != nil {
+	_, commit, err := g.takeBackup(context.Background(), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := commit(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -180,6 +193,39 @@ func TestUpdateBackupFailureStopsTheUpdate(t *testing.T) {
 	}
 	if !f.called(retagOld) {
 		t.Errorf("tag not put back on the old image; calls: %v", f.calls)
+	}
+}
+
+func TestUpdateRevertedKeepsTheOldBackup(t *testing.T) {
+	_, g := backupFake(t, false)
+	dir := filepath.Join(g.BackupDir, "app")
+	os.MkdirAll(dir, 0o700)
+	backup.WriteManifest(dir, &backup.Manifest{Image: "sha256:older"})
+	res, err := g.Update(context.Background(), "app", "sha256:d2", "")
+	if err != nil || res.Status != StatusReverted {
+		t.Fatalf("Update = %+v %v, want reverted", res, err)
+	}
+	if m, err := backup.ReadManifest(dir); err != nil || m.Image != "sha256:older" {
+		t.Errorf("a reverted update must keep the old backup: %+v %v", m, err)
+	}
+	if _, err := os.Stat(filepath.Join(g.BackupDir, ".app.new")); err == nil {
+		t.Error("the new copy was left behind")
+	}
+}
+
+func TestUpdateDoneCommitsTheNewBackup(t *testing.T) {
+	_, g := backupFake(t, true)
+	dir := filepath.Join(g.BackupDir, "app")
+	os.MkdirAll(dir, 0o700)
+	backup.WriteManifest(dir, &backup.Manifest{Image: "sha256:older"})
+	if res, err := g.Update(context.Background(), "app", "sha256:d2", ""); err != nil || res.Status != StatusDone {
+		t.Fatalf("Update = %+v %v, want done", res, err)
+	}
+	if m, err := backup.ReadManifest(dir); err != nil || m.Image != "sha256:old" {
+		t.Errorf("manifest = %+v %v, want the backup of sha256:old", m, err)
+	}
+	if _, err := os.Stat(filepath.Join(g.BackupDir, ".app.new")); err == nil {
+		t.Error("the new copy was left behind")
 	}
 }
 

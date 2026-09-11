@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"regexp"
 	"slices"
 	"strings"
@@ -338,16 +339,21 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 	}
 	var took time.Duration
 	var size int64
+	var commit func() error
 	if opts.backup {
 		b0 := time.Now()
-		m, err := g.takeBackup(ctx, old)
+		m, c, err := g.takeBackup(ctx, old)
 		if err != nil {
 			if serr := g.D.Start(ctx, old.ID); serr != nil {
 				return Result{}, fmt.Errorf("%s: backup failed (%v), and restarting it failed: %v. %s is stopped. Start it with: docker start %s", name, err, serr, name, name)
 			}
 			return Result{}, fmt.Errorf("%s: backup failed, so no update: %w. The old version is running again", name, err)
 		}
-		took, size = time.Since(b0), m.Bytes()
+		took, size, commit = time.Since(b0), m.Bytes(), c
+		// Unless commit moves it in, the new copy goes, so a revert keeps the
+		// old backup: it still belongs with the version that runs.
+		_, tmp, _ := g.backupPaths(name)
+		defer os.RemoveAll(tmp)
 	}
 	if err := g.D.Rename(ctx, old.ID, p.TmpName); err != nil {
 		if opts.keepStopped {
@@ -388,6 +394,10 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 	if opts.backup {
 		msg = fmt.Sprintf("%s: now running %s (down %s, backup %s, %s)", name, ref,
 			down.Round(100*time.Millisecond), took.Round(100*time.Millisecond), backup.FormatSize(size))
+		if err := commit(); err != nil {
+			log.Printf("%s: save the new backup: %v", name, err)
+			msg += fmt.Sprintf(". Warning: the new backup could not be saved: %v; the previous backup is kept", err)
+		}
 	}
 	return Result{Status: StatusDone, Downtime: down, Backup: took, BackupBytes: size, Message: msg}, nil
 }
