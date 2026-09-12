@@ -43,6 +43,10 @@ type Gate struct {
 	SelfID string        // the gate's own container ID (or its prefix); never touched
 	Poll   time.Duration // health poll interval; 0 means 1s
 
+	// ControlLink says the control server link is on. The gate never talks
+	// to it: it only needs the host name for the updater.
+	ControlLink bool
+
 	BackupDir   string // gate-only backup folder, /var/lib/bosun-backups; never given to the updater
 	WarnSize    int64  // a backup bigger than this gets a one-time warning; 0 means never
 	BackupSrc   string // BackupDir as Docker sees it (volume name or host path); found from the gate's mounts if empty

@@ -98,7 +98,7 @@ func newGate() *gate.Gate {
 	self, _ := os.Hostname()              // Docker sets it to the short container ID
 	warn, _ := backup.ParseSize(warnSize) // checked at gate start by checkSettings
 	return &gate.Gate{D: docker.New(dockerSock), Dir: stateDir, RunDir: runDir, BackupDir: backupDir,
-		WarnSize: warn, SelfID: self}
+		WarnSize: warn, SelfID: self, ControlLink: controlURL != ""}
 }
 
 // checkSettings refuses settings that would hand gate-only folders to the

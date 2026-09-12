@@ -423,3 +423,51 @@ func TestUpdaterBodyKeepsTheUsersHost(t *testing.T) {
 		t.Errorf("want the user's host once and only once: %s", s)
 	}
 }
+
+// createUpdater is the call that makes the updater container.
+const createUpdater = "POST /containers/create?name=bosun-updater"
+
+// spawnFake is a gate that can find itself, has no old updater to remove,
+// and whose GET /info fails: Docker gives no host name.
+func spawnFake(t *testing.T) (*dockerFake, *Gate) {
+	t.Helper()
+	f := &dockerFake{
+		containers: map[string]string{"self-id": `{"Id":"self-id","Name":"/bosun-gate","Image":"sha256:img","Config":{"Env":[]},"HostConfig":{},"Mounts":[]}`},
+		images:     map[string]string{},
+		fail:       map[string]bool{"GET /info": true},
+		list:       `[]`,
+	}
+	g := f.gate(t)
+	g.SelfID = "self-id"
+	return f, g
+}
+
+// Turning on an optional reporting feature must never stop all updating:
+// the updater refuses to start without a host name, so the gate says so
+// instead of starting a container that crash-loops.
+func TestSpawnUpdaterFailsWithoutAHostWhenTheLinkIsOn(t *testing.T) {
+	f, g := spawnFake(t)
+	g.ControlLink = true
+	err := g.SpawnUpdater(context.Background())
+	if err == nil {
+		t.Fatal("want an error when the link is on and Docker gives no host name")
+	}
+	if !strings.Contains(err.Error(), "BOSUN_HOST") || !strings.Contains(err.Error(), "BOSUN_CONTROL_URL") {
+		t.Errorf("error must say what to do next: %v", err)
+	}
+	if f.called(createUpdater) {
+		t.Errorf("no updater must be created; calls: %v", f.calls)
+	}
+}
+
+// With the link off the host is unused, so a missing host name is only a
+// log line and updating carries on.
+func TestSpawnUpdaterCarriesOnWithoutAHostWhenTheLinkIsOff(t *testing.T) {
+	f, g := spawnFake(t)
+	if err := g.SpawnUpdater(context.Background()); err != nil {
+		t.Fatalf("SpawnUpdater = %v, want the updater started anyway", err)
+	}
+	if !f.called(createUpdater) || !f.called("POST /containers/new-id/start") {
+		t.Errorf("the updater must still be created and started; calls: %v", f.calls)
+	}
+}

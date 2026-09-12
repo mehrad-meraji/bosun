@@ -143,9 +143,15 @@ func (g *Gate) SpawnUpdater(ctx context.Context) error {
 	// user can override it with BOSUN_HOST on the gate.
 	host := ""
 	if !hasEnv(self.Config.Env, "BOSUN_HOST") {
-		if h, err := g.D.Info(ctx); err != nil {
+		h, err := g.D.Info(ctx)
+		switch {
+		case err != nil && g.ControlLink:
+			// The updater refuses to start without a host, so starting it
+			// here would only crash-loop it and stop all updating.
+			return fmt.Errorf("read the Docker host name: %w. The control server link needs a host name; set BOSUN_HOST on bosun-gate, or unset BOSUN_CONTROL_URL", err)
+		case err != nil:
 			log.Printf("read the Docker host name: %v; events will have no host", err)
-		} else {
+		default:
 			host = h
 		}
 	}
