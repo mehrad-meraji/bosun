@@ -46,14 +46,21 @@ func TestNewIsOffWithoutAURL(t *testing.T) {
 
 func TestNewRefusesPlainHTTPAndBadSettings(t *testing.T) {
 	tok := tokenFile(t, "t")
-	for _, tc := range []struct{ name, url, token string }{
-		{"plain http", "http://server", tok},
-		{"no scheme", "server:8080", tok},
-		{"missing token file", "https://server", filepath.Join(t.TempDir(), "gone")},
-		{"empty token file", "https://server", tokenFile(t, "")},
+	for _, tc := range []struct{ name, url, token, wantSubstr string }{
+		{"plain http", "http://server", tok, ""},
+		{"no scheme", "server:8080", tok, ""},
+		{"host and port, no scheme", "192.168.1.5:8443", tok, "https://"},
+		{"query string", "https://server?x=1", tok, ""},
+		{"missing token file", "https://server", filepath.Join(t.TempDir(), "gone"), ""},
+		{"empty token file", "https://server", tokenFile(t, ""), ""},
 	} {
-		if _, err := New(tc.url, tc.token, "h", false); err == nil {
+		_, err := New(tc.url, tc.token, "h", false)
+		if err == nil {
 			t.Errorf("%s: want an error", tc.name)
+			continue
+		}
+		if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
+			t.Errorf("%s: err = %v, want it to mention %q", tc.name, err, tc.wantSubstr)
 		}
 	}
 	if _, err := New("https://server", tok, "", false); err == nil {
@@ -170,6 +177,27 @@ func TestSendDoesNotRetryABadTokenAndNeverLeaksIt(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "secret-token") {
 		t.Errorf("the token must never be in an error: %v", err)
+	}
+}
+
+func TestSendDoesNotFollowARedirect(t *testing.T) {
+	var tries atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tries.Add(1)
+		http.Redirect(w, r, "/elsewhere", http.StatusFound)
+	}))
+	defer s.Close()
+
+	old := retryWaits
+	retryWaits = []time.Duration{time.Millisecond}
+	defer func() { retryWaits = old }()
+
+	c := testClient(t, s)
+	if err := c.Send(context.Background(), Event{Type: EventWarning}); err == nil {
+		t.Fatal("want an error: a redirect would turn the POST into a bodiless GET")
+	}
+	if n := tries.Load(); n != 1 {
+		t.Errorf("tries = %d, want 1: a 302 is under 500 and must not retry", n)
 	}
 }
 

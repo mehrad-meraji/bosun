@@ -84,7 +84,7 @@ func New(rawURL, tokenFile, host string, insecure bool) (*Client, error) {
 	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return nil, fmt.Errorf("BOSUN_CONTROL_URL %q: %w", rawURL, err)
+		return nil, fmt.Errorf("BOSUN_CONTROL_URL %q is not a URL; use https://your-server. For a server on your own LAN, set BOSUN_CONTROL_INSECURE=true", rawURL)
 	}
 	switch {
 	case u.Host == "":
@@ -93,6 +93,9 @@ func New(rawURL, tokenFile, host string, insecure bool) (*Client, error) {
 	case u.Scheme == "http" && insecure:
 	default:
 		return nil, fmt.Errorf("BOSUN_CONTROL_URL %q must start with https://. For a server on your own LAN, set BOSUN_CONTROL_INSECURE=true", rawURL)
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return nil, fmt.Errorf("BOSUN_CONTROL_URL %q must be a base URL with no query or #fragment; use https://your-server/api", rawURL)
 	}
 	b, err := os.ReadFile(tokenFile)
 	if err != nil {
@@ -109,8 +112,13 @@ func New(rawURL, tokenFile, host string, insecure bool) (*Client, error) {
 		url:   strings.TrimSuffix(rawURL, "/"),
 		token: token,
 		host:  host,
-		http:  &http.Client{Timeout: 20 * time.Second},
-		seen:  map[string]time.Time{},
+		http: &http.Client{
+			Timeout: 20 * time.Second,
+			// A redirect would turn this POST into a bodiless GET and the
+			// event would be lost with no error. Treat it as a failure.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
+		seen: map[string]time.Time{},
 	}, nil
 }
 
