@@ -12,8 +12,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/mehrad-meraji/bosun/internal/sock"
@@ -290,35 +292,63 @@ func (c *Client) Wait(ctx context.Context, id string) (int, error) {
 // without a TTY: the output comes in chunks behind an 8-byte header.
 const multiplexed = "application/vnd.docker.multiplexed-stream"
 
-// Logs returns the last 50 lines a container printed, up to 4 KB.
+const (
+	logLines = 50      // lines asked of Docker
+	logRead  = 1 << 20 // most bytes read from Docker
+	logKeep  = 4096    // most bytes returned
+)
+
+// Logs returns the last lines a container printed: 50 lines, and if those are
+// longer than 4 KB, their last 4 KB. The end matters most, because that is
+// where a crash says why.
 func (c *Client) Logs(ctx context.Context, id string) (string, error) {
-	q := url.Values{"stdout": {"1"}, "stderr": {"1"}, "tail": {"50"}}
+	q := url.Values{"stdout": {"1"}, "stderr": {"1"}, "tail": {strconv.Itoa(logLines)}}
 	resp, err := c.do(ctx, http.MethodGet, "/containers/"+id+"/logs", q, nil, nil)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	if resp.Header.Get("Content-Type") == multiplexed {
+	b, err := io.ReadAll(io.LimitReader(resp.Body, logRead))
+	if framed(resp.Header.Get("Content-Type")) {
 		b = deframe(b)
 	}
-	return strings.TrimSpace(string(b)), err
+	return strings.TrimSpace(string(lastBytes(b))), err
 }
 
-// deframe drops Docker's 8-byte chunk headers. The 4 KB cap can cut the last
-// chunk, so a short or incomplete one keeps whatever arrived.
+// framed reports whether the body carries Docker's chunk headers. Docker
+// names the format, so there is nothing to guess.
+func framed(contentType string) bool {
+	t, _, err := mime.ParseMediaType(contentType)
+	return err == nil && t == multiplexed
+}
+
+// deframe drops Docker's 8-byte chunk headers. A read cut short leaves a
+// chunk shorter than its header says, so whatever arrived is kept.
 func deframe(b []byte) []byte {
 	out := make([]byte, 0, len(b))
 	for len(b) >= 8 {
 		n := int(binary.BigEndian.Uint32(b[4:8]))
 		b = b[8:]
-		if n > len(b) {
+		if n < 0 || n > len(b) { // a length field cannot be trusted
 			n = len(b)
 		}
 		out = append(out, b[:n]...)
 		b = b[n:]
 	}
 	return out
+}
+
+// lastBytes keeps the last logKeep bytes, starting at a line break so the
+// first line is whole.
+func lastBytes(b []byte) []byte {
+	if len(b) <= logKeep {
+		return b
+	}
+	b = b[len(b)-logKeep:]
+	if i := bytes.IndexByte(b, '\n'); i >= 0 && i < len(b)-1 {
+		b = b[i+1:]
+	}
+	return b
 }
 
 // SplitRef splits "host:5000/app:1.2" into ("host:5000/app", "1.2").

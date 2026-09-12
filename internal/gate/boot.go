@@ -90,8 +90,10 @@ func (g *Gate) recoverOne(ctx context.Context, st *state.State, p state.Pending)
 		g.kept(ctx, st.Entry(p.Name), p, old.Image)
 		return p.Name + ": an update was cut off; the new version is running and was kept", "", nil
 	case err == nil:
-		// Read the logs before the container is thrown away.
-		logs = g.failedLogs(ctx, cur, cur.ID)
+		// Read the logs before the container is thrown away. Consent comes
+		// from the old container, the one the user labelled: a new image
+		// could otherwise opt its users in with a LABEL of its own.
+		logs = g.failedLogs(ctx, old, cur.ID)
 		if err := g.D.Remove(ctx, cur.ID, true); err != nil {
 			return "", "", err
 		}

@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -202,14 +203,66 @@ func TestLogsKeepsARawStreamAsItIs(t *testing.T) {
 func TestLogsKeepsWhatArrivedOfACutFrame(t *testing.T) {
 	h := []byte{1, 0, 0, 0, 0, 0, 0, 20}
 	body := append([]byte{1, 0, 0, 0, 0, 0, 0, 5}, "first"...)
-	body = append(body, h...)      // says 20 bytes
-	body = append(body, "cut"...)  // only 3 arrive
+	body = append(body, h...)     // says 20 bytes
+	body = append(body, "cut"...) // only 3 arrive
 	c := fake(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/vnd.docker.multiplexed-stream")
 		w.Write(body)
 	})
 	if out, err := c.Logs(context.Background(), "abc"); err != nil || out != "firstcut" {
 		t.Fatalf("Logs = %q, %v, want %q", out, err, "firstcut")
+	}
+}
+
+// The crash message is at the END of the log, so that is the end Bosun keeps.
+func TestLogsKeepsTheEndOfALongLog(t *testing.T) {
+	var body []byte
+	for i := 0; i < 200; i++ {
+		line := fmt.Sprintf("line %03d %s\n", i, strings.Repeat("x", 100))
+		h := []byte{1, 0, 0, 0, 0, 0, 0, 0}
+		binary.BigEndian.PutUint32(h[4:], uint32(len(line)))
+		body = append(body, append(h, line...)...)
+	}
+	c := fake(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.docker.multiplexed-stream; charset=utf-8")
+		w.Write(body)
+	})
+	out, err := c.Logs(context.Background(), "abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) > 4096 {
+		t.Errorf("kept %d bytes, want 4096 at most", len(out))
+	}
+	if !strings.HasSuffix(out, "line 199 "+strings.Repeat("x", 100)) {
+		t.Errorf("the last line is missing: %q", out[max(0, len(out)-60):])
+	}
+	if strings.Contains(out, "line 000") {
+		t.Error("kept the start of the log instead of the end")
+	}
+	if !strings.HasPrefix(out, "line ") {
+		t.Errorf("the first line must be whole, got %q", out[:20])
+	}
+}
+
+func TestLogsOnAnEmptyBody(t *testing.T) {
+	c := fake(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.docker.multiplexed-stream")
+	})
+	if out, err := c.Logs(context.Background(), "abc"); err != nil || out != "" {
+		t.Fatalf("Logs = %q, %v, want empty", out, err)
+	}
+}
+
+func TestLogsOnATrailingPartialHeader(t *testing.T) {
+	body := append([]byte{1, 0, 0, 0, 0, 0, 0, 3}, "hey"...)
+	body = append(body, 1, 0, 0) // a header that never finishes
+	c := fake(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.docker.multiplexed-stream")
+		w.Write(body)
+	})
+	if out, err := c.Logs(context.Background(), "abc"); err != nil || out != "hey" {
+		t.Fatalf("Logs = %q, %v, want hey", out, err)
 	}
 }
 

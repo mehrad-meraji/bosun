@@ -134,10 +134,14 @@ cannot pick an image, roll back, or touch your data.
 
 When an update rolls back, Bosun deletes the new container seconds later, and
 its output goes with it. Put `bosun.logs=true` on a container and Bosun reads
-the last 50 lines (up to 4 KB) of that container first and sends them with the
+the last 50 lines of that container first — and if those are longer than 4 KB,
+their last 4 KB, because the end is where a crash says why — then sends them with the
 `update.rolled_back` event. The same happens when Bosun restarts after a crash
 and throws away a new version that is not healthy: the lines wait in Bosun's
 state file until the updater collects them.
+
+Nothing is read at all unless `BOSUN_CONTROL_URL` is set: with no server to
+send to, there is nobody to send to.
 
 This is off for every container until you turn it on, one container at a time,
 because **app output can hold secrets**. Nothing is hidden or removed from the

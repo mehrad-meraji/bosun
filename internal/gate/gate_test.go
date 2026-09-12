@@ -526,6 +526,7 @@ func TestRevertedUpdateCarriesTheFailedLogs(t *testing.T) {
 	f := swapFake(false)
 	withLogs(f, "boom: no such table\n")
 	g := f.gate(t)
+	g.ControlLink = true
 	res, err := g.Update(context.Background(), "app", "sha256:d2", "")
 	if err != nil {
 		t.Fatal(err)
@@ -543,6 +544,7 @@ func TestRevertedUpdateCarriesTheFailedLogs(t *testing.T) {
 func TestRevertedUpdateSendsNoLogsWithoutTheLabel(t *testing.T) {
 	f := swapFake(false)
 	g := f.gate(t)
+	g.ControlLink = true
 	res, err := g.Update(context.Background(), "app", "sha256:d2", "")
 	if err != nil {
 		t.Fatal(err)
@@ -561,11 +563,27 @@ func TestGoodUpdateSendsNoLogs(t *testing.T) {
 	f := swapFake(true)
 	withLogs(f, "all good\n")
 	g := f.gate(t)
+	g.ControlLink = true
 	res, err := g.Update(context.Background(), "app", "sha256:d2", "")
 	if err != nil || res.Status != StatusDone {
 		t.Fatalf("Update = %+v, %v", res, err)
 	}
 	if res.Logs != "" || f.called(logsCall) {
 		t.Errorf("Logs = %q, calls %v; want none for a healthy update", res.Logs, f.calls)
+	}
+}
+
+// With no control server there is nobody to send the output to, so it is
+// never read: it would only sit in a result nothing reads, or on disk.
+func TestNoLogsWithoutAControlServer(t *testing.T) {
+	f := swapFake(false)
+	withLogs(f, "boom: no such table\n")
+	g := f.gate(t) // ControlLink stays false
+	res, err := g.Update(context.Background(), "app", "sha256:d2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Logs != "" || f.called(logsCall) {
+		t.Errorf("Logs = %q, calls %v; want none with the link off", res.Logs, f.calls)
 	}
 }

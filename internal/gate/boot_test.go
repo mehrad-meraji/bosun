@@ -479,6 +479,7 @@ func TestRecoverKeepsTheFailedLogs(t *testing.T) {
 	f := recoverFake(false, "") // new container exists, fails the health wait
 	withLogs(f, "boom: migration failed\n")
 	g := f.gate(t)
+	g.ControlLink = true
 	st := recoverApp(t, g, state.Entry{}, "sha256:d2")
 	if st.Events[0].Logs != "boom: migration failed" {
 		t.Errorf("event logs = %q, want the tail of the failed container", st.Events[0].Logs)
@@ -491,8 +492,23 @@ func TestRecoverKeepsTheFailedLogs(t *testing.T) {
 func TestRecoverSendsNoLogsWithoutTheLabel(t *testing.T) {
 	f := recoverFake(false, "")
 	g := f.gate(t)
+	g.ControlLink = true
 	st := recoverApp(t, g, state.Entry{}, "sha256:d2")
 	if st.Events[0].Logs != "" || f.called(logsCall) {
 		t.Errorf("logs = %q, calls %v; want none without the label", st.Events[0].Logs, f.calls)
+	}
+}
+
+// The label must come from the container the user configured. A new image
+// that ships LABEL bosun.logs=true must not opt its users in.
+func TestRecoverReadsConsentFromTheOldContainer(t *testing.T) {
+	f := recoverFake(false, "")
+	f.containers["new-id"] = strings.Replace(f.containers["new-id"], `"Labels":{`, `"Labels":{"bosun.logs":"true",`, 1)
+	f.containers["app"] = f.containers["new-id"]
+	g := f.gate(t)
+	g.ControlLink = true
+	st := recoverApp(t, g, state.Entry{}, "sha256:d2")
+	if st.Events[0].Logs != "" || f.called(logsCall) {
+		t.Errorf("logs = %q, calls %v; the new image's own label must not count", st.Events[0].Logs, f.calls)
 	}
 }

@@ -387,14 +387,22 @@ type swapOpts struct {
 	steps       *stepper
 }
 
+// logRead bounds the read: it happens while the app is stopped, and the
+// output is a nice-to-have, never worth extra downtime.
+const logRead = 10 * time.Second
+
 // failedLogs reads the last output of a container Bosun is about to throw
 // away, for containers with bosun.logs=true. The container is deleted
-// seconds later, so nobody else can read it. It is sent to the control
-// server only, never to a note: app output can hold secrets.
+// seconds later, so nobody else can read it. It goes to the control server
+// only, so it is not read at all when that link is off. c is the container
+// the user configured, which is where consent is read from; id is the
+// container to read.
 func (g *Gate) failedLogs(ctx context.Context, c *docker.Container, id string) string {
-	if id == "" || c.Config.Labels[LabelLogs] != "true" {
+	if id == "" || !g.ControlLink || c.Config.Labels[LabelLogs] != "true" {
 		return ""
 	}
+	ctx, cancel := context.WithTimeout(ctx, logRead)
+	defer cancel()
 	out, err := g.D.Logs(ctx, id)
 	if err != nil {
 		log.Printf("%s: read the failed container's logs: %v", strings.TrimPrefix(c.Name, "/"), err)

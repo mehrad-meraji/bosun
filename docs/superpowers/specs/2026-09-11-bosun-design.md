@@ -340,8 +340,12 @@ stopped), `version.available` (notify mode), `gate.refused`, `registry.failing`,
 - `update.failed` has no `steps`: when the gate returns an error instead of a result,
   there is no honest step list, and the `reason` says what failed.
 - `command_id` is set when a command caused the event.
-- `logs` holds the last 50 lines (up to 4 KB) of a container Bosun threw away, and only
-  for a container with `bosun.logs=true`. It is set on `update.rolled_back`, and on a
+- `logs` holds the last 50 lines of a container Bosun threw away, cut to their last
+  4 KB if they are longer, because the end is where a crash says why. Only for a
+  container with `bosun.logs=true`, and only while `BOSUN_CONTROL_URL` is set: with no
+  server there is nobody to send to, so nothing is read. The label is read from the
+  container the user configured, never from the new image, so an image cannot opt its
+  users in with a `LABEL` of its own. It is set on `update.rolled_back`, and on a
   `recovery` event when crash recovery removed an unhealthy new version. Bosun reads it
   before the container is deleted, because nothing can read it afterwards. Nothing is
   redacted: the label is the consent. The lines go to the control server only — never to

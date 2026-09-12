@@ -165,8 +165,10 @@ func TestFailedUpdateLogsComeBack(t *testing.T) {
 	if err != nil || res.Status != gate.StatusReverted {
 		t.Fatalf("update: %+v %v", res, err)
 	}
-	if !strings.Contains(res.Logs, "boom: no such table") {
-		t.Fatalf("Logs = %q, want the failed container's own words", res.Logs)
+	// Exactly equal, not merely contained: without the header stripping the
+	// value would be the same words behind Docker's chunk header.
+	if res.Logs != "boom: no such table" {
+		t.Fatalf("Logs = %q, want exactly the failed container's own words", res.Logs)
 	}
 	if v := version(t, name); v != "v1" {
 		t.Fatalf("running %s, want v1 back", v)

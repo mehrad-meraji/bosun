@@ -127,12 +127,13 @@ func TestEventJSONIsTheShapeTheServerExpects(t *testing.T) {
 			{Name: "backup", Status: "skipped", Detail: "bosun.backup is off"},
 		},
 		Reason: "health check failed",
+		Logs:   "boom: no such table",
 	}
 	b, err := json.Marshal(ev)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"schema":1,"id":"0f8c2c1e-5b7a-4d0e-9a51-3c2d7e6f1a90","time":"2026-09-11T04:01:33Z","host":"worker-1","bosun_version":"0.2.0","type":"update.rolled_back","container":"redis","image":"redis:7.4","from_digest":"sha256:b20c","to_digest":"sha256:9ae1","downtime_ms":38000,"steps":[{"name":"pull","status":"ok","ms":6200},{"name":"backup","status":"skipped","detail":"bosun.backup is off"}],"reason":"health check failed"}`
+	want := `{"schema":1,"id":"0f8c2c1e-5b7a-4d0e-9a51-3c2d7e6f1a90","time":"2026-09-11T04:01:33Z","host":"worker-1","bosun_version":"0.2.0","type":"update.rolled_back","container":"redis","image":"redis:7.4","from_digest":"sha256:b20c","to_digest":"sha256:9ae1","downtime_ms":38000,"steps":[{"name":"pull","status":"ok","ms":6200},{"name":"backup","status":"skipped","detail":"bosun.backup is off"}],"reason":"health check failed","logs":"boom: no such table"}`
 	if string(b) != want {
 		t.Errorf("event JSON changed.\ngot:  %s\nwant: %s", b, want)
 	}
