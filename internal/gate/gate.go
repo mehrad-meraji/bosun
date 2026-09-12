@@ -291,6 +291,34 @@ func (g *Gate) Rollback(ctx context.Context, name string, withData bool) (Result
 	return res, f.Save(st)
 }
 
+// SkipClearResult says how many versions came off a container's skip list.
+type SkipClearResult struct {
+	Cleared int    `json:"cleared"`
+	Message string `json:"message"`
+}
+
+// SkipClear removes a container's versions from the skip list. It starts no
+// update: the next round may try that version again. The state file belongs
+// to the gate, so the CLI and the control server both come through here.
+func (g *Gate) SkipClear(name string) (SkipClearResult, error) {
+	if !nameRE.MatchString(name) {
+		return SkipClearResult{}, refuse("bad container name %q", name)
+	}
+	f, st, err := state.Open(g.Dir, false)
+	if err != nil {
+		return SkipClearResult{}, err
+	}
+	defer f.Close()
+	e := st.Containers[name]
+	if e == nil || len(e.Skip) == 0 {
+		return SkipClearResult{Message: fmt.Sprintf("%s: nothing was on the skip list", name)}, nil
+	}
+	n := len(e.Skip)
+	e.Skip = nil
+	res := SkipClearResult{Cleared: n, Message: fmt.Sprintf("%s: skip list cleared (%d). The next round may update it again", name, n)}
+	return res, f.Save(st)
+}
+
 // swapOpts controls a swap. digest is the version an update goes to, or ""
 // for a rollback; crash recovery reads it. backup copies the old container's
 // mounts while it is stopped, before anything else changes. keepStopped

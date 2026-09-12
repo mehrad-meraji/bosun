@@ -33,6 +33,18 @@ func (r UpdateRequest) Validate() error {
 	return nil
 }
 
+// SkipClearRequest is the only other request with input.
+type SkipClearRequest struct {
+	Name string `json:"name"`
+}
+
+func (r SkipClearRequest) Validate() error {
+	if !nameRE.MatchString(r.Name) {
+		return refuse("bad container name %q", r.Name)
+	}
+	return nil
+}
+
 // decode reads one small JSON object with no unknown fields.
 func decode(body io.Reader, v any) error {
 	dec := json.NewDecoder(io.LimitReader(body, 16<<10))
@@ -66,6 +78,19 @@ func (g *Gate) Serve(ctx context.Context, l net.Listener) error {
 		res, err := g.Update(r.Context(), req.Name, req.Digest, req.Auth)
 		reply(w, res, err)
 	})
+	mux.HandleFunc("POST /skip-clear", func(w http.ResponseWriter, r *http.Request) {
+		var req SkipClearRequest
+		err := decode(r.Body, &req)
+		if err == nil {
+			err = req.Validate()
+		}
+		if err != nil {
+			reply(w, nil, err)
+			return
+		}
+		res, err := g.SkipClear(req.Name)
+		reply(w, res, err)
+	})
 	mux.HandleFunc("POST /events", func(w http.ResponseWriter, r *http.Request) {
 		evs, err := g.takeEvents()
 		reply(w, evs, err)
@@ -81,6 +106,8 @@ func reply(w http.ResponseWriter, v any, err error) {
 	case errors.As(err, &ref):
 		log.Printf("REFUSED: %s", ref.Msg)
 		http.Error(w, err.Error(), http.StatusForbidden)
+	case errors.Is(err, state.ErrBusy):
+		http.Error(w, err.Error(), http.StatusConflict)
 	case err != nil:
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	default:
@@ -136,6 +163,12 @@ func (c *Client) List(ctx context.Context) ([]Watched, error) {
 func (c *Client) Update(ctx context.Context, name, digest, auth string) (Result, error) {
 	var r Result
 	err := sock.Post(ctx, c.http, "http://gate/update", UpdateRequest{Name: name, Digest: digest, Auth: auth}, &r)
+	return r, err
+}
+
+func (c *Client) SkipClear(ctx context.Context, name string) (SkipClearResult, error) {
+	var r SkipClearResult
+	err := sock.Post(ctx, c.http, "http://gate/skip-clear", SkipClearRequest{Name: name}, &r)
 	return r, err
 }
 

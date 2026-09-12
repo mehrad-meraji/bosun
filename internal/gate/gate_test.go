@@ -3,6 +3,7 @@ package gate
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -387,6 +388,52 @@ func TestSwapRevertStartFailSaysHowToStart(t *testing.T) {
 	}
 	if st, _ := state.Read(g.Dir); len(st.Pending) != 1 {
 		t.Errorf("pending record must stay for crash recovery: %+v", st.Pending)
+	}
+}
+
+func TestSkipClear(t *testing.T) {
+	f := swapFake(true)
+	g := f.gate(t)
+	setEntry(t, g, "app", state.Entry{Skip: []string{"sha256:d2", "sha256:d3"}})
+
+	res, err := g.SkipClear("app")
+	if err != nil || res.Cleared != 2 {
+		t.Fatalf("SkipClear = %+v, %v, want 2 cleared", res, err)
+	}
+	st, err := state.Read(g.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Entry("app").Skip) != 0 {
+		t.Errorf("skip list = %v, want empty", st.Entry("app").Skip)
+	}
+
+	// Nothing skipped is not an error: the server asked, and now it is clear.
+	res, err = g.SkipClear("app")
+	if err != nil || res.Cleared != 0 || !strings.Contains(res.Message, "nothing") {
+		t.Errorf("SkipClear on a clean entry = %+v, %v, want 0 and a plain message", res, err)
+	}
+}
+
+func TestSkipClearRefusesBadNames(t *testing.T) {
+	g := swapFake(true).gate(t)
+	for _, name := range []string{"", "../etc", "a b", strings.Repeat("x", 200)} {
+		if _, err := g.SkipClear(name); !IsRefused(err) {
+			t.Errorf("SkipClear(%q) = %v, want a refusal", name, err)
+		}
+	}
+}
+
+func TestSkipClearIsBusyWhileAnUpdateRuns(t *testing.T) {
+	g := swapFake(true).gate(t)
+	f, st, err := state.Open(g.Dir, true) // hold the lock, like a running update
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = st
+	defer f.Close()
+	if _, err := g.SkipClear("app"); !errors.Is(err, state.ErrBusy) {
+		t.Errorf("err = %v, want state.ErrBusy", err)
 	}
 }
 

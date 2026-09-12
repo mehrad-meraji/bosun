@@ -258,20 +258,11 @@ func cmdSkip(args []string) error {
 		}
 		return nil
 	case len(pos) == 2 && pos[0] == "clear":
-		f, st, err := state.Open(stateDir, false)
+		res, err := newGate().SkipClear(pos[1])
 		if err != nil {
 			return err
 		}
-		defer f.Close()
-		e := st.Containers[pos[1]]
-		if e == nil || len(e.Skip) == 0 {
-			return fmt.Errorf("nothing is skipped for %s. Run `bosun skip ls`", pos[1])
-		}
-		e.Skip = nil
-		if err := f.Save(st); err != nil {
-			return err
-		}
-		fmt.Printf("%s: skip list cleared. The next round may update it again.\n", pos[1])
+		fmt.Println(res.Message + ".")
 		return nil
 	}
 	return errors.New("usage: bosun skip ls | bosun skip clear <name>")
