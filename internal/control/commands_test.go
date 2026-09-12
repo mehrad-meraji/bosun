@@ -123,9 +123,33 @@ func TestCommandsDropsRepeats(t *testing.T) {
 	if host != "worker-1" {
 		t.Errorf("host = %q, want worker-1", host)
 	}
+	// Not marked done yet: "try again later" must mean the command comes back.
+	cmds, refs, err := c.Commands(context.Background())
+	if err != nil || len(cmds) != 1 || len(refs) != 0 {
+		t.Fatalf("second poll = %v, %v, %v, want the command again while it has no terminal result", cmds, refs, err)
+	}
+	c.Done("a")
+	cmds, refs, err = c.Commands(context.Background())
+	if err != nil || len(cmds) != 0 || len(refs) != 0 {
+		t.Errorf("third poll = %v, %v, %v, want the repeat dropped and not reported", cmds, refs, err)
+	}
+}
+
+// A refusal is terminal, so it is reported once and then dropped: the old
+// code reported the same refusal at every poll, forever.
+func TestCommandsReportsARefusalOnce(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `[{"id":"a","type":"reboot"}]`)
+	}))
+	defer s.Close()
+	c := testClient(t, s)
+	_, refs, err := c.Commands(context.Background())
+	if err != nil || len(refs) != 1 {
+		t.Fatalf("first poll = %v, %v, want one refusal", refs, err)
+	}
 	cmds, refs, err := c.Commands(context.Background())
 	if err != nil || len(cmds) != 0 || len(refs) != 0 {
-		t.Errorf("second poll = %v, %v, %v, want the repeat dropped and not reported", cmds, refs, err)
+		t.Errorf("second poll = %v, %v, %v, want the refusal not reported twice", cmds, refs, err)
 	}
 }
 
@@ -137,6 +161,10 @@ func TestCommandsForgetsOldIDs(t *testing.T) {
 	c := testClient(t, s)
 	if _, _, err := c.Commands(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	c.Done("a")
+	if cmds, _, _ := c.Commands(context.Background()); len(cmds) != 0 {
+		t.Fatalf("a done command came back: %v", cmds)
 	}
 	c.seen["a"] = time.Now().Add(-25 * time.Hour) // older than the window
 	cmds, _, err := c.Commands(context.Background())

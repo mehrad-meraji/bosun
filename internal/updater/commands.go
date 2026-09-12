@@ -33,15 +33,42 @@ func (u *Updater) Commands(ctx context.Context, poll time.Duration) error {
 			}
 			continue
 		}
-		for _, r := range refs {
-			log.Printf("refused command %s: %s", r.ID, r.Reason)
-			u.emit(resultEvent(r.ID, "refused", r.Reason))
-		}
-		for _, c := range cmds {
-			status, detail := u.runCommand(ctx, c)
+		u.runReply(ctx, cmds, refs)
+	}
+}
+
+// runReply runs one poll's worth of commands and reports each one. The
+// server already marked the refusals as terminal; each command is marked
+// once its own result is terminal, so a busy one comes back next poll.
+func (u *Updater) runReply(ctx context.Context, cmds []control.Command, refs []control.Refusal) {
+	for _, r := range refs {
+		log.Printf("refused command %s: %s", r.ID, r.Reason)
+		u.emit(resultEvent(r.ID, "refused", r.Reason))
+	}
+	// Every check in one reply asks for the same thing: a round now. Running
+	// all of them would let one reply start up to maxCommands rounds in a
+	// row, hitting registry rate limits and pushing the scheduled round out.
+	// So the first check runs and the rest report its result.
+	var ranCheck bool
+	var checkStatus, checkDetail string
+	for _, c := range cmds {
+		status, detail := "", ""
+		switch {
+		case c.Type == control.CmdCheck && ranCheck:
+			status, detail = checkStatus, checkDetail
+			log.Printf("command %s (check): the round this reply already asked for: %s", c.ID, status)
+		case c.Type == control.CmdCheck:
+			status, detail = u.runCommand(ctx, c)
+			ranCheck, checkStatus, checkDetail = true, status, detail
 			log.Printf("command %s (%s): %s: %s", c.ID, c.Type, status, detail)
-			u.emit(resultEvent(c.ID, status, detail))
+		default:
+			status, detail = u.runCommand(ctx, c)
+			log.Printf("command %s (%s): %s: %s", c.ID, c.Type, status, detail)
 		}
+		if status != "busy" {
+			u.Control.Done(c.ID) // terminal; a replay must not run it again
+		}
+		u.emit(resultEvent(c.ID, status, detail))
 	}
 }
 

@@ -47,8 +47,10 @@ var (
 )
 
 // Commands asks the server what to do. It returns the commands to run and
-// the ones to report as refused. A command already run in the last 24 hours
-// is dropped without a word, so a replay cannot run it twice.
+// the ones to report as refused. A command whose result was terminal in the
+// last 24 hours is dropped without a word, so a replay cannot run it twice.
+// A command still without a terminal result (a busy one) comes back, which
+// is what "try again later" means.
 func (c *Client) Commands(ctx context.Context) ([]Command, []Refusal, error) {
 	u := c.url + "/commands?" + url.Values{"host": {c.host}}.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
@@ -73,7 +75,20 @@ func (c *Client) Commands(ctx context.Context) ([]Command, []Refusal, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return c.fresh(cmds), refs, nil
+	cmds = c.fresh(cmds) // also prunes seen, once per poll
+	// A refusal is terminal: nothing ran, and nothing ever will. Report it
+	// once and remember it, or every poll reports the same refusal forever.
+	var fresh []Refusal
+	for _, r := range refs {
+		if _, ok := c.seen[r.ID]; ok {
+			continue
+		}
+		fresh = append(fresh, r)
+	}
+	for _, r := range fresh {
+		c.Done(r.ID)
+	}
+	return cmds, fresh, nil
 }
 
 // parse reads the command list. Unknown fields and unknown commands are
@@ -165,7 +180,13 @@ func clip(s string) string {
 	return s[:maxEcho] + "..."
 }
 
-// fresh drops commands already run in the last 24 hours.
+// Done remembers that this command reached a terminal result, so a replay
+// cannot run it twice. A command with no terminal result yet (a busy one) is
+// left unmarked on purpose: the server's next poll offers it again.
+func (c *Client) Done(id string) { c.seen[id] = time.Now() }
+
+// fresh drops commands whose result was already terminal in the last 24
+// hours. It only reads seen; Done is what writes to it.
 func (c *Client) fresh(in []Command) []Command {
 	now := time.Now()
 	for id, t := range c.seen {
@@ -183,7 +204,6 @@ func (c *Client) fresh(in []Command) []Command {
 			log.Printf("control server: command %s was already run; dropped", cmd.ID)
 			continue
 		}
-		c.seen[cmd.ID] = now
 		out = append(out, cmd)
 	}
 	return out

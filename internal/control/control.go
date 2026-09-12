@@ -74,9 +74,9 @@ type Client struct {
 	host  string
 	http  *http.Client
 
-	// seen holds command IDs already run, so a replay cannot run them twice.
-	// Commands is called from one goroutine only (the poll loop), so this
-	// needs no lock. See commands.go.
+	// seen holds the IDs of commands whose result was terminal, so a replay
+	// cannot run them twice. Commands and Done are both called from one
+	// goroutine only (the poll loop), so this needs no lock. See commands.go.
 	seen map[string]time.Time
 }
 
