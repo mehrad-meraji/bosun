@@ -118,7 +118,9 @@ func (g *Gate) kept(ctx context.Context, e *state.Entry, p state.Pending, oldIma
 		if e.Prev != "" {
 			_ = g.D.RemoveImage(ctx, e.Prev)
 		}
-		e.Prev, e.UpdatedAt = "", time.Now().UTC()
+		// The old version is running and healthy, so a --with-data rollback
+		// is finished: clear the flag, or nothing can touch this app again.
+		e.Prev, e.UpdatedAt, e.DataRestored = "", time.Now().UTC(), false
 		return
 	}
 	prev, err := g.keep(ctx, p.Name, oldImage, e.Prev)

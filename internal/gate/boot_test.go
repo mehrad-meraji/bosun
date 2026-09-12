@@ -385,3 +385,23 @@ func TestRecoverKeptRollbackSkipsTheVersionItLeft(t *testing.T) {
 		t.Errorf("entry = %+v, want d1 skipped and no rollback record; calls: %v", e, f.calls)
 	}
 }
+
+// A --with-data rollback that is cut off after the old version came up
+// healthy is finished: the DataRestored flag must be cleared, or Update and
+// Rollback both refuse the app for good.
+func TestRecoverKeptRollbackClearsDataRestored(t *testing.T) {
+	f := recoverFake(true, "healthy")
+	g := f.gate(t)
+	setEntry(t, g, "app", state.Entry{Prev: "bosun/prev/app:abc", DataRestored: true},
+		state.Pending{Name: "app", OldID: "old-id", TmpName: "app-bosun-x", KeepStopped: true})
+	if err := g.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	st, err := state.Read(g.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e := st.Entry("app"); e.DataRestored {
+		t.Errorf("entry = %+v, want DataRestored cleared after a kept rollback", e)
+	}
+}
