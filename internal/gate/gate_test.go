@@ -328,6 +328,63 @@ func TestUpdateSameImageIsANoop(t *testing.T) {
 	}
 }
 
+func TestUpdateRecordsSteps(t *testing.T) {
+	f := swapFake(true)
+	g := f.gate(t)
+	res, err := g.Update(context.Background(), "app", "sha256:d2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, s := range res.Steps {
+		got = append(got, s.Name+":"+s.Status)
+	}
+	want := []string{"pull:ok", "stop:ok", "backup:skipped", "start:ok", "health:ok"}
+	if !slices.Equal(got, want) {
+		t.Errorf("steps = %v, want %v", got, want)
+	}
+}
+
+func TestUpdateRevertedRecordsFailedSteps(t *testing.T) {
+	f := swapFake(false) // the new container does not stay up
+	g := f.gate(t)
+	res, err := g.Update(context.Background(), "app", "sha256:d2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, s := range res.Steps {
+		got = append(got, s.Name+":"+s.Status)
+	}
+	want := []string{"pull:ok", "stop:ok", "backup:skipped", "start:ok", "health:failed", "rollback:ok", "skip:ok"}
+	if !slices.Equal(got, want) {
+		t.Errorf("steps = %v, want %v", got, want)
+	}
+	for _, s := range res.Steps {
+		if s.Name == "health" && s.Detail == "" {
+			t.Error("the failed health step must carry a short detail")
+		}
+	}
+}
+
+func TestBackupStepIsRecorded(t *testing.T) {
+	f, g := backupFake(t, true)
+	_ = f
+	res, err := g.Update(context.Background(), "app", "sha256:d2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range res.Steps {
+		if s.Name == "backup" {
+			if s.Status != "ok" {
+				t.Errorf("backup step = %+v, want ok", s)
+			}
+			return
+		}
+	}
+	t.Errorf("no backup step in %+v", res.Steps)
+}
+
 func TestUpdateRefusesStoppedContainer(t *testing.T) {
 	f := swapFake(true)
 	f.containers["app"] = strings.Replace(oldCtr, `"Running":true`, `"Running":false`, 1)

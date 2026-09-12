@@ -65,6 +65,48 @@ type Result struct {
 	Backup      time.Duration `json:"backup,omitempty"`       // time the backup took, inside Downtime
 	BackupBytes int64         `json:"backup_bytes,omitempty"` // size of the backup
 	Message     string        `json:"message"`
+	Steps       []Step        `json:"steps,omitempty"`
+}
+
+// Step is one step of an update, for the control server link. The CLI does
+// not print steps; only the link sends them.
+type Step struct {
+	Name   string `json:"name"`
+	Status string `json:"status"` // "ok", "failed" or "skipped"
+	Ms     int64  `json:"ms,omitempty"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// stepper records the update sequence. Every method is safe on a nil
+// stepper, so a rollback can pass nil and record nothing.
+type stepper struct {
+	list []Step
+	t    time.Time
+}
+
+func (s *stepper) add(name, status, detail string) {
+	if s == nil {
+		return
+	}
+	now := time.Now()
+	s.list = append(s.list, Step{Name: name, Status: status, Ms: now.Sub(s.t).Milliseconds(), Detail: detail})
+	s.t = now
+}
+
+// skip records a step that did not run, so it has no time.
+func (s *stepper) skip(name, detail string) {
+	if s == nil {
+		return
+	}
+	s.list = append(s.list, Step{Name: name, Status: "skipped", Detail: detail})
+	s.t = time.Now()
+}
+
+func (s *stepper) steps() []Step {
+	if s == nil {
+		return nil
+	}
+	return s.list
 }
 
 // RefusedError is a request the gate will not do. It means a bug or an attack.
@@ -137,9 +179,11 @@ func (g *Gate) Update(ctx context.Context, name, digest, auth string) (Result, e
 	if slices.Contains(e.Skip, digest) {
 		return Result{}, refuse("%s: %s is on the skip list", name, digest)
 	}
+	sp := &stepper{t: time.Now()}
 	if err := g.D.Pull(ctx, ref, auth); err != nil {
 		return Result{}, err
 	}
+	sp.add("pull", "ok", "")
 	img, err := g.D.InspectImage(ctx, ref)
 	if err != nil {
 		return Result{}, err
@@ -152,7 +196,7 @@ func (g *Gate) Update(ctx context.Context, name, digest, auth string) (Result, e
 	}
 	// From here on, finish even if the caller hangs up. A half-done swap is worse.
 	ctx = context.WithoutCancel(ctx)
-	res, err := g.swap(ctx, f, st, c, ref, swapOpts{digest: digest, backup: c.Config.Labels[LabelBackup] == "true"})
+	res, err := g.swap(ctx, f, st, c, ref, swapOpts{digest: digest, backup: c.Config.Labels[LabelBackup] == "true", steps: sp})
 	if err != nil {
 		g.retag(ctx, c.Image, ref) // the pull moved the tag; point it back at what runs
 		return Result{}, err
@@ -160,7 +204,9 @@ func (g *Gate) Update(ctx context.Context, name, digest, auth string) (Result, e
 	if res.Status == StatusReverted {
 		e.AddSkip(digest)
 		g.retag(ctx, c.Image, ref)
+		sp.add("skip", "ok", digest+" added to the skip list")
 		res.Message += fmt.Sprintf(". The new version is on the skip list; `bosun skip clear %s` allows it again", name)
+		res.Steps = sp.steps()
 		return res, f.Save(st)
 	}
 	prev, err := g.keep(ctx, name, c.Image, e.Prev)
@@ -172,6 +218,7 @@ func (g *Gate) Update(ctx context.Context, name, digest, auth string) (Result, e
 		res.Message += fmt.Sprintf(". Warning: the backup of %s is %s, so its updates have long downtime", name, backup.FormatSize(res.BackupBytes))
 		e.WarnedBig = true
 	}
+	res.Steps = sp.steps()
 	return res, f.Save(st)
 }
 
@@ -329,6 +376,7 @@ type swapOpts struct {
 	digest      string
 	backup      bool
 	keepStopped bool
+	steps       *stepper
 }
 
 // swap replaces old with a new container running ref, then waits for it to
@@ -370,8 +418,10 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 
 	t0 := time.Now()
 	if err := g.D.Stop(ctx, old.ID); err != nil {
+		opts.steps.add("stop", "failed", err.Error())
 		return Result{}, fmt.Errorf("%s: stop: %w", name, err)
 	}
+	opts.steps.add("stop", "ok", "")
 	var took time.Duration
 	var size int64
 	var commit func() error
@@ -379,16 +429,20 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 		b0 := time.Now()
 		m, c, err := g.takeBackup(ctx, old)
 		if err != nil {
+			opts.steps.add("backup", "failed", err.Error())
 			if serr := g.D.Start(ctx, old.ID); serr != nil {
 				return Result{}, fmt.Errorf("%s: backup failed (%v), and restarting it failed: %v. %s is stopped. Start it with: docker start %s", name, err, serr, name, name)
 			}
 			return Result{}, fmt.Errorf("%s: backup failed, so no update: %w. The old version is running again", name, err)
 		}
 		took, size, commit = time.Since(b0), m.Bytes(), c
+		opts.steps.add("backup", "ok", backup.FormatSize(size))
 		// Unless commit moves it in, the new copy goes, so a revert keeps the
 		// old backup: it still belongs with the version that runs.
 		_, tmp, _ := g.backupPaths(name)
 		defer os.RemoveAll(tmp)
+	} else {
+		opts.steps.skip("backup", "bosun.backup is off")
 	}
 	if err := g.D.Rename(ctx, old.ID, p.TmpName); err != nil {
 		if opts.keepStopped {
@@ -404,13 +458,21 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 		err = g.D.Start(ctx, newID)
 	}
 	down := time.Since(t0)
-	if err == nil {
-		err = g.waitHealthy(ctx, newID, timeoutOf(old))
+	if err != nil {
+		opts.steps.add("start", "failed", err.Error())
+	} else {
+		opts.steps.add("start", "ok", "")
+		if err = g.waitHealthy(ctx, newID, timeoutOf(old)); err != nil {
+			opts.steps.add("health", "failed", err.Error())
+		} else {
+			opts.steps.add("health", "ok", "")
+		}
 	}
 	if err != nil {
 		if renamed, rerr := g.revert(ctx, old.ID, newID, name, !opts.keepStopped); rerr != nil {
 			// revert failed; keep Pending in state so Recover can fix it on next gate start
 			keepPending = true
+			opts.steps.add("rollback", "failed", rerr.Error())
 			if opts.keepStopped {
 				return Result{}, fmt.Errorf("%s: new version failed (%v) and putting the old container back failed: %w. The old container is stopped as %s; do not start it on this data. Restart bosun-gate to recover, or run `bosun rollback %s --with-data` again", name, err, rerr, p.TmpName, name)
 			}
@@ -419,7 +481,8 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 			}
 			return Result{}, fmt.Errorf("%s: new version failed (%v) and putting the old one back failed: %w. The old container is stopped as %s; restart bosun-gate to recover it, or rename it back to %s and start it", name, err, rerr, p.TmpName, name)
 		}
-		return Result{Status: StatusReverted, Downtime: time.Since(t0),
+		opts.steps.add("rollback", "ok", "")
+		return Result{Status: StatusReverted, Downtime: time.Since(t0), Steps: opts.steps.steps(),
 			Message: fmt.Sprintf("%s: new version failed (%v); the old version is back", name, err)}, nil
 	}
 	if err := g.D.Remove(ctx, old.ID, true); err != nil {
@@ -434,7 +497,7 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 			msg += fmt.Sprintf(". Warning: the new backup could not be saved: %v; the previous backup is kept", err)
 		}
 	}
-	return Result{Status: StatusDone, Downtime: down, Backup: took, BackupBytes: size, Message: msg}, nil
+	return Result{Status: StatusDone, Downtime: down, Backup: took, BackupBytes: size, Steps: opts.steps.steps(), Message: msg}, nil
 }
 
 // revert removes the new container and puts the old one back. renamed says
