@@ -7,6 +7,7 @@ package docker
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -285,8 +286,11 @@ func (c *Client) Wait(ctx context.Context, id string) (int, error) {
 	return out.StatusCode, nil
 }
 
-// Logs returns the last lines a container printed, up to 4 KB. The container
-// must use Tty: true, so the output is plain text without Docker's framing.
+// multiplexed is the content type Docker uses for a container started
+// without a TTY: the output comes in chunks behind an 8-byte header.
+const multiplexed = "application/vnd.docker.multiplexed-stream"
+
+// Logs returns the last 50 lines a container printed, up to 4 KB.
 func (c *Client) Logs(ctx context.Context, id string) (string, error) {
 	q := url.Values{"stdout": {"1"}, "stderr": {"1"}, "tail": {"50"}}
 	resp, err := c.do(ctx, http.MethodGet, "/containers/"+id+"/logs", q, nil, nil)
@@ -295,7 +299,26 @@ func (c *Client) Logs(ctx context.Context, id string) (string, error) {
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.Header.Get("Content-Type") == multiplexed {
+		b = deframe(b)
+	}
 	return strings.TrimSpace(string(b)), err
+}
+
+// deframe drops Docker's 8-byte chunk headers. The 4 KB cap can cut the last
+// chunk, so a short or incomplete one keeps whatever arrived.
+func deframe(b []byte) []byte {
+	out := make([]byte, 0, len(b))
+	for len(b) >= 8 {
+		n := int(binary.BigEndian.Uint32(b[4:8]))
+		b = b[8:]
+		if n > len(b) {
+			n = len(b)
+		}
+		out = append(out, b[:n]...)
+		b = b[n:]
+	}
+	return out
 }
 
 // SplitRef splits "host:5000/app:1.2" into ("host:5000/app", "1.2").

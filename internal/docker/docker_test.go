@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"encoding/binary"
 	"io"
 	"net"
 	"net/http"
@@ -164,6 +165,51 @@ func TestLogs(t *testing.T) {
 	})
 	if out, err := c.Logs(context.Background(), "abc"); err != nil || out != "bosun: backup file is unreadable" {
 		t.Fatalf("Logs = %q, %v", out, err)
+	}
+}
+
+// A container started without a TTY gets Docker's multiplexed stream: every
+// chunk carries an 8-byte header, which must not reach the reader.
+func TestLogsStripsDockerFraming(t *testing.T) {
+	frame := func(stream byte, text string) []byte {
+		h := []byte{stream, 0, 0, 0, 0, 0, 0, 0}
+		binary.BigEndian.PutUint32(h[4:], uint32(len(text)))
+		return append(h, text...)
+	}
+	body := append(frame(1, "starting up\n"), frame(2, "boom: no such table\n")...)
+	c := fake(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.docker.multiplexed-stream")
+		w.Write(body)
+	})
+	want := "starting up\nboom: no such table"
+	if out, err := c.Logs(context.Background(), "abc"); err != nil || out != want {
+		t.Fatalf("Logs = %q, %v, want %q", out, err, want)
+	}
+}
+
+// A TTY container's stream is plain text and must pass through untouched.
+func TestLogsKeepsARawStreamAsItIs(t *testing.T) {
+	c := fake(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.docker.raw-stream")
+		io.WriteString(w, "bosun: backup file is unreadable\n")
+	})
+	if out, err := c.Logs(context.Background(), "abc"); err != nil || out != "bosun: backup file is unreadable" {
+		t.Fatalf("Logs = %q, %v", out, err)
+	}
+}
+
+// The 4 KB cap can cut a frame in half. What arrived whole is still returned.
+func TestLogsKeepsWhatArrivedOfACutFrame(t *testing.T) {
+	h := []byte{1, 0, 0, 0, 0, 0, 0, 20}
+	body := append([]byte{1, 0, 0, 0, 0, 0, 0, 5}, "first"...)
+	body = append(body, h...)      // says 20 bytes
+	body = append(body, "cut"...)  // only 3 arrive
+	c := fake(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.docker.multiplexed-stream")
+		w.Write(body)
+	})
+	if out, err := c.Logs(context.Background(), "abc"); err != nil || out != "firstcut" {
+		t.Fatalf("Logs = %q, %v, want %q", out, err, "firstcut")
 	}
 }
 
