@@ -225,7 +225,7 @@ func TestCommandsLoopSurvivesABadReply(t *testing.T) {
 // The end of the context is not a failure: it must not log a failed read.
 func TestCommandsLoopEndsQuietly(t *testing.T) {
 	buf := quiet(t)
-	got := make(chan struct{})
+	got := make(chan struct{}, 1)
 	block := make(chan struct{})
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
@@ -242,6 +242,25 @@ func TestCommandsLoopEndsQuietly(t *testing.T) {
 	if strings.Contains(buf.read(), "read commands") {
 		t.Errorf("the end of the context must not log a failed read: %q", buf.read())
 	}
+}
+
+// A server that is down must not stop the loop either: the poll fails, the
+// loop logs it and carries on until the context ends.
+func TestCommandsLoopSurvivesADeadServer(t *testing.T) {
+	buf := quiet(t)
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := s.URL
+	s.Close() // nothing is listening any more
+	u, _ := linked(t, url, nil, fakeReg{})
+	_, stop := runLoop(t, u)
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(buf.read(), "read commands") { // wait for a failed poll
+		if time.Now().After(deadline) {
+			t.Fatal("no failed poll was logged")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	stop() // Commands must still return nil
 }
 
 // The busy contract: a command with no terminal result comes back and runs
