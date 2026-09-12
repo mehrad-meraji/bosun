@@ -73,7 +73,10 @@ type Client struct {
 	host  string
 	http  *http.Client
 
-	seen map[string]time.Time // command IDs already run; see commands.go
+	// seen holds command IDs already run, so a replay cannot run them twice.
+	// Commands is called from one goroutine only (the poll loop), so this
+	// needs no lock. See commands.go.
+	seen map[string]time.Time
 }
 
 // New returns nil when rawURL is empty: the link is off. The token comes
