@@ -2,13 +2,20 @@ package updater
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/mehrad-meraji/bosun/internal/control"
 	"github.com/mehrad-meraji/bosun/internal/gate"
 	"github.com/mehrad-meraji/bosun/internal/state"
 )
@@ -160,5 +167,119 @@ func TestRedact(t *testing.T) {
 			continue
 		}
 		t.Errorf("redact(%q) = %q, missing expected %q or contains redacted secrets", tt.input, got, tt.want)
+	}
+}
+
+// controlFake is a control server that records the events it is sent.
+func controlFake(t *testing.T) (*control.Client, func() []control.Event) {
+	t.Helper()
+	var mu sync.Mutex
+	var got []control.Event
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var ev control.Event
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&ev); err != nil {
+			t.Error(err)
+		}
+		mu.Lock()
+		got = append(got, ev)
+		mu.Unlock()
+	}))
+	t.Cleanup(s.Close)
+	tok := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tok, []byte("t"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := control.New(s.URL, tok, "worker-1", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// events go out in another goroutine; wait for n of them
+	return c, func() []control.Event {
+		for i := 0; i < 100; i++ {
+			mu.Lock()
+			n := len(got)
+			mu.Unlock()
+			if n > 0 {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]control.Event(nil), got...)
+	}
+}
+
+func TestRoundSendsAnEvent(t *testing.T) {
+	u, _, _ := setup(web("update", []string{"sha256:old"}, nil), fakeReg{digest: "sha256:new"})
+	c, events := controlFake(t)
+	u.Control = c
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	u.StartEvents(ctx)
+
+	if _, err := u.Round(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	evs := events()
+	if len(evs) != 1 || evs[0].Type != control.EventUpdateDone || evs[0].Container != "web" {
+		t.Fatalf("events = %+v, want one update.done for web", evs)
+	}
+	if evs[0].Host != "worker-1" || evs[0].Schema != control.Schema {
+		t.Errorf("event = %+v, want the fixed fields filled in", evs[0])
+	}
+}
+
+func TestDryRunSendsNothing(t *testing.T) {
+	u, _, _ := setup(web("update", []string{"sha256:old"}, nil), fakeReg{digest: "sha256:new"})
+	c, events := controlFake(t)
+	u.Control = c
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	u.StartEvents(ctx)
+	if _, err := u.Round(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if evs := events(); len(evs) != 0 {
+		t.Errorf("a dry run must send nothing: %+v", evs)
+	}
+}
+
+func TestRoundWorksWithTheLinkOff(t *testing.T) {
+	u, g, notes := setup(web("update", []string{"sha256:old"}, nil), fakeReg{digest: "sha256:new"})
+	u.StartEvents(context.Background()) // no Control: must not panic and must start nothing
+	if _, err := u.Round(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if len(g.updates) != 1 || len(*notes) != 1 {
+		t.Errorf("the round must work the same with the link off: %v %v", g.updates, *notes)
+	}
+}
+
+func TestEmitDropsWhenTheQueueIsFull(t *testing.T) {
+	u := &Updater{Control: &control.Client{}} // never read: emit only fills the queue
+	u.evs = make(chan control.Event, 1)
+	u.emit(control.Event{Type: control.EventWarning})
+	u.emit(control.Event{Type: control.EventWarning}) // must not block
+	if len(u.evs) != 1 {
+		t.Errorf("queue = %d, want the second event dropped", len(u.evs))
+	}
+}
+
+func TestGateEventsGoOutAsEvents(t *testing.T) {
+	u, g, _ := setup(nil, fakeReg{digest: "sha256:new"})
+	g.events = []state.Event{{Kind: "recovered", Name: "app", Message: "app: the old version is back"}}
+	c, events := controlFake(t)
+	u.Control = c
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	u.StartEvents(ctx)
+	if _, err := u.Round(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	evs := events()
+	if len(evs) != 1 || evs[0].Type != control.EventRecovery {
+		t.Fatalf("events = %+v, want one recovery event", evs)
 	}
 }

@@ -17,6 +17,7 @@ import (
 
 	"github.com/robfig/cron/v3"
 
+	"github.com/mehrad-meraji/bosun/internal/control"
 	"github.com/mehrad-meraji/bosun/internal/gate"
 	"github.com/mehrad-meraji/bosun/internal/sock"
 	"github.com/mehrad-meraji/bosun/internal/state"
@@ -41,6 +42,11 @@ type Updater struct {
 	Reg    Registry
 	Notify func(string)
 
+	// Control is the control server link, or nil when it is off.
+	Control *control.Client
+
+	evs chan control.Event // events waiting to go out
+
 	mu    sync.Mutex
 	fails map[string]int    // registry failures in a row, per container
 	told  map[string]string // notify mode: last digest we told about
@@ -48,8 +54,51 @@ type Updater struct {
 
 var ErrBusy = errors.New("a round is running, try again later")
 
+// eventQueue is how many events wait to go out. A slow server must never
+// hold up an update, so a full queue drops the oldest news: the log keeps it.
+const eventQueue = 100
+
+// StartEvents starts the one goroutine that sends events. It does nothing
+// when the link is off. Call it once, before Run.
+func (u *Updater) StartEvents(ctx context.Context) {
+	if u.Control == nil {
+		return
+	}
+	u.evs = make(chan control.Event, eventQueue)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev := <-u.evs:
+				if err := u.Control.Send(ctx, ev); err != nil && ctx.Err() == nil {
+					log.Printf("control event %s dropped: %v", ev.Type, err)
+				}
+			}
+		}
+	}()
+}
+
+// emit queues one event. It never blocks and never fails an update.
+func (u *Updater) emit(ev control.Event) {
+	if u.Control == nil || u.evs == nil {
+		return
+	}
+	select {
+	case u.evs <- ev:
+	default:
+		log.Printf("control events are backed up; dropped a %s event", ev.Type)
+	}
+}
+
 // Round checks every watched container once. dryRun only reports.
 func (u *Updater) Round(ctx context.Context, dryRun bool) ([]string, error) {
+	return u.round(ctx, dryRun, "")
+}
+
+// round is Round. cmdID is set when a control-server command asked for it,
+// so the events say which command they belong to.
+func (u *Updater) round(ctx context.Context, dryRun bool, cmdID string) ([]string, error) {
 	if !u.mu.TryLock() {
 		return nil, ErrBusy
 	}
@@ -74,6 +123,7 @@ func (u *Updater) Round(ctx context.Context, dryRun bool) ([]string, error) {
 			if !dryRun {
 				if u.fails[w.Name]++; u.fails[w.Name] == 3 {
 					u.Notify(fmt.Sprintf("%s: registry check failed 3 rounds in a row: %v", w.Name, err))
+					u.emit(registryEvent(w, err, cmdID))
 				}
 			}
 			continue
@@ -89,6 +139,7 @@ func (u *Updater) Round(ctx context.Context, dryRun bool) ([]string, error) {
 			if !dryRun && u.told[w.Name] != d {
 				u.told[w.Name] = d
 				u.Notify(msg)
+				u.emit(availableEvent(w, d, cmdID))
 			}
 		case dryRun:
 			add("%s: would update %s", w.Name, w.Ref)
@@ -96,23 +147,26 @@ func (u *Updater) Round(ctx context.Context, dryRun bool) ([]string, error) {
 			auth, err := u.Reg.Auth(w.Ref)
 			if err != nil {
 				u.Notify(add("%s: could not read the registry login: %v", w.Name, err))
+				u.emit(failedEvent(w, d, err, cmdID))
 				continue
 			}
 			res, err := u.Gate.Update(ctx, w.Name, d, auth)
 			if err != nil {
 				u.Notify(add("%s: update failed: %v", w.Name, err))
+				u.emit(failedEvent(w, d, err, cmdID))
 				continue
 			}
 			u.Notify(add("%s", res.Message))
+			u.emit(updateEvent(w, d, res, cmdID))
 		}
 	}
 	if !dryRun {
-		u.sendEvents(ctx)
+		u.sendEvents(ctx, cmdID)
 	}
 	return lines, nil
 }
 
-func (u *Updater) sendEvents(ctx context.Context) {
+func (u *Updater) sendEvents(ctx context.Context, cmdID string) {
 	evs, err := u.Gate.Events(ctx)
 	if err != nil {
 		log.Printf("read gate events: %v", err)
@@ -120,6 +174,7 @@ func (u *Updater) sendEvents(ctx context.Context) {
 	}
 	for _, e := range evs {
 		u.Notify(e.Message)
+		u.emit(gateEvent(e, cmdID))
 	}
 }
 
@@ -129,14 +184,14 @@ func (u *Updater) Run(ctx context.Context, schedule string) error {
 	if err != nil {
 		return fmt.Errorf("BOSUN_SCHEDULE %q: %w", schedule, err)
 	}
-	u.sendEvents(ctx)
+	u.sendEvents(ctx, "")
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-time.After(time.Until(sched.Next(time.Now()))):
 		}
-		lines, err := u.Round(ctx, false)
+		lines, err := u.round(ctx, false, "")
 		for _, l := range lines {
 			log.Println(l)
 		}
