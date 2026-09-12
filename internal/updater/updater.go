@@ -29,6 +29,7 @@ type Gate interface {
 	List(ctx context.Context) ([]gate.Watched, error)
 	Update(ctx context.Context, name, digest, auth string) (gate.Result, error)
 	Events(ctx context.Context) ([]state.Event, error)
+	SkipClear(ctx context.Context, name string) (gate.SkipClearResult, error)
 }
 
 // Registry is the part of *registry.Checker the updater uses.

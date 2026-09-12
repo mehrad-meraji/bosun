@@ -13,8 +13,10 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/mehrad-meraji/bosun/internal/backup"
+	"github.com/mehrad-meraji/bosun/internal/control"
 	"github.com/mehrad-meraji/bosun/internal/docker"
 	"github.com/mehrad-meraji/bosun/internal/gate"
 	"github.com/mehrad-meraji/bosun/internal/registry"
@@ -35,7 +37,16 @@ var (
 	stateDir   = filepath.Clean(env("BOSUN_STATE_DIR", "/var/lib/bosun"))
 	backupDir  = filepath.Clean(env("BOSUN_BACKUP_DIR", "/var/lib/bosun-backups"))
 	warnSize   = env("BOSUN_BACKUP_WARN_SIZE", "10GB")
+
+	controlURL      = os.Getenv("BOSUN_CONTROL_URL")
+	controlToken    = filepath.Clean(env("BOSUN_CONTROL_TOKEN_FILE", "/etc/bosun/control-token"))
+	controlCommands = os.Getenv("BOSUN_CONTROL_COMMANDS") == "true"
+	controlPoll     = env("BOSUN_CONTROL_POLL", "60s")
+	controlInsecure = os.Getenv("BOSUN_CONTROL_INSECURE") == "true"
 )
+
+// minPoll is the fastest the updater asks the control server for commands.
+const minPoll = 15 * time.Second
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.LUTC)
@@ -110,7 +121,33 @@ func checkSettings() error {
 	if inside(stateDir, backupDir) || inside(backupDir, stateDir) {
 		return fmt.Errorf("BOSUN_STATE_DIR (%s) and BOSUN_BACKUP_DIR (%s) overlap; pick two separate folders", stateDir, backupDir)
 	}
+	if controlURL != "" {
+		if !inside(controlToken, "/etc/bosun") {
+			return fmt.Errorf("BOSUN_CONTROL_TOKEN_FILE (%s) must be under /etc/bosun, the only folder the updater can read; mount it there", controlToken)
+		}
+		if _, err := pollEvery(); err != nil {
+			return err
+		}
+		// The same check the updater makes, so a bad URL or token stops the gate.
+		// The host is a stand-in here: the gate only learns the real one when
+		// it starts the updater, and the updater checks it for real.
+		if _, err := control.New(controlURL, controlToken, "check", controlInsecure); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// pollEvery reads BOSUN_CONTROL_POLL.
+func pollEvery() (time.Duration, error) {
+	d, err := time.ParseDuration(controlPoll)
+	if err != nil {
+		return 0, fmt.Errorf("BOSUN_CONTROL_POLL %q: %w. Use a value like 60s", controlPoll, err)
+	}
+	if d < minPoll {
+		return 0, fmt.Errorf("BOSUN_CONTROL_POLL %q is under the lowest value %s; use %s or more", controlPoll, minPoll, minPoll)
+	}
+	return d, nil
 }
 
 func inside(child, parent string) bool {
@@ -152,7 +189,12 @@ func runUpdater(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	u := &updater.Updater{Gate: gate.Dial(filepath.Join(runDir, "gate.sock")), Reg: reg, Notify: updater.Sender(urls)}
+	ctrl, err := control.New(controlURL, controlToken, os.Getenv("BOSUN_HOST"), controlInsecure)
+	if err != nil {
+		return err
+	}
+	u := &updater.Updater{Gate: gate.Dial(filepath.Join(runDir, "gate.sock")), Reg: reg, Notify: updater.Sender(urls), Control: ctrl}
+	u.StartEvents(ctx)
 	l, err := sock.Listen(filepath.Join(runDir, "updater.sock"))
 	if err != nil {
 		return err
@@ -162,8 +204,26 @@ func runUpdater(ctx context.Context) error {
 			log.Printf("updater socket: %v", err)
 		}
 	}()
+	if ctrl != nil && controlCommands {
+		poll, err := pollEvery()
+		if err != nil {
+			return err
+		}
+		go func() {
+			if err := u.Commands(ctx, poll); err != nil {
+				log.Printf("commands: %v", err)
+			}
+		}()
+	}
 	schedule := env("BOSUN_SCHEDULE", "0 4 * * *")
-	log.Printf("updater ready: %d notify URLs, schedule %q", len(urls), schedule)
+	link := "off"
+	if ctrl != nil {
+		link = "events only"
+		if controlCommands {
+			link = "events and commands"
+		}
+	}
+	log.Printf("updater ready: %d notify URLs, schedule %q, control link %s", len(urls), schedule, link)
 	return u.Run(ctx, schedule)
 }
 

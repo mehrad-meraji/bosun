@@ -24,6 +24,10 @@ type fakeGate struct {
 	ws      []gate.Watched
 	updates []string
 	events  []state.Event
+
+	cleared     gate.SkipClearResult
+	clearErr    error
+	skipCleared string
 }
 
 func (f *fakeGate) List(context.Context) ([]gate.Watched, error) { return f.ws, nil }
@@ -35,6 +39,11 @@ func (f *fakeGate) Events(context.Context) ([]state.Event, error) {
 	evs := f.events
 	f.events = nil
 	return evs, nil
+}
+
+func (f *fakeGate) SkipClear(_ context.Context, name string) (gate.SkipClearResult, error) {
+	f.skipCleared = name
+	return f.cleared, f.clearErr
 }
 
 type fakeReg struct {
