@@ -13,6 +13,9 @@ services:
     group_add: ["${DOCKER_GID:?set DOCKER_GID, see README}"]
     environment:
       BOSUN_SCHEDULE: "0 4 * * *"
+      # Optional control server link. See README, "Control server link".
+      # BOSUN_CONTROL_URL: https://sentinel.example.com/api/bosun
+      # BOSUN_CONTROL_COMMANDS: "true"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - bosun-run:/run/bosun
@@ -21,6 +24,7 @@ services:
       # Optional. Everything under /etc/bosun is passed to the updater read-only.
       # - ./notify.txt:/etc/bosun/notify.txt:ro
       # - ./registry-auth.json:/etc/bosun/docker/config.json:ro
+      # - ./control-token:/etc/bosun/control-token:ro
 
 volumes:
   bosun-run:

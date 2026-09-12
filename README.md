@@ -57,6 +57,11 @@ touched.
 | `BOSUN_CA_FILE` | none | CA certificate for registries with private certificates. |
 | `BOSUN_BACKUP_DIR` | `/var/lib/bosun-backups` | Backup folder inside the gate (the `bosun-backups` volume). |
 | `BOSUN_BACKUP_WARN_SIZE` | `10GB` | A backup bigger than this adds a one-time warning to the update note. |
+| `BOSUN_CONTROL_URL` | none | Base URL of the control server. Off when not set. `https://` only, unless `BOSUN_CONTROL_INSECURE=true`. |
+| `BOSUN_CONTROL_TOKEN_FILE` | `/etc/bosun/control-token` | File with the bearer token. Must be under `/etc/bosun`. |
+| `BOSUN_CONTROL_COMMANDS` | `false` | Ask the server for commands. Events work without it. |
+| `BOSUN_CONTROL_POLL` | `60s` | How often to ask. Lowest value `15s`. |
+| `BOSUN_HOST` | Docker host name | The host name in events and command polls. |
 
 Registry logins: mount a Docker `config.json` at `/etc/bosun/docker/config.json`. Use a
 read-only token made just for Bosun (for GHCR: only `read:packages`). Do not mount your
@@ -94,6 +99,34 @@ docker exec -it bosun-gate bosun rollback nginx
 docker exec -it bosun-gate bosun skip clear nginx
 docker exec -it bosun-gate bosun help rollback
 ```
+
+## Control server link (optional)
+
+Bosun can report to a control server, for example Sentinel, and take two
+commands from it. It is off until you set `BOSUN_CONTROL_URL`.
+
+The gate still has no network and opens no port. The updater sends the
+events and asks for the commands. The server never connects to Bosun.
+
+```yaml
+    environment:
+      BOSUN_CONTROL_URL: https://sentinel.example.com/api/bosun
+      BOSUN_CONTROL_COMMANDS: "true"
+    volumes:
+      - ./control-token:/etc/bosun/control-token:ro
+```
+
+Events are JSON, one per thing that happened: `update.done`,
+`update.rolled_back`, `update.failed`, `version.available`, `gate.refused`,
+`registry.failing`, `recovery`, `warning` and `command.result`. They hold no
+registry logins, no notify URLs and no env vars.
+
+There are two commands, and no others: `check` runs a round now, and
+`skip_clear` lets a container try a skipped version again. A hacked server
+cannot pick an image, roll back, or touch your data.
+
+Events wait in memory only. If the updater restarts, events that did not go
+out are lost; the next round still works.
 
 ## Limits
 

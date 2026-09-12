@@ -309,7 +309,6 @@ Content-Type: application/json
   "from_digest": "sha256:b20c...",
   "to_digest": "sha256:9ae1...",
   "downtime_ms": 38000,
-  "backup": null,
   "steps": [
     { "name": "pull", "status": "ok", "ms": 6200 },
     { "name": "stop", "status": "ok", "ms": 1100 },
@@ -319,10 +318,14 @@ Content-Type: application/json
     { "name": "rollback", "status": "ok", "ms": 1300 },
     { "name": "skip", "status": "ok", "detail": "sha256:9ae1... added to the skip list" }
   ],
-  "reason": "health check failed",
-  "command_id": null
+  "reason": "health check failed"
 }
 ```
+
+`backup` is `{ "bytes": 1234, "ms": 900 }` when the update took a backup, and
+absent when it did not. `command_id` is absent unless a command caused the
+event. `status` is on `command.result` only: `done`, `busy`, `refused` or
+`failed`.
 
 Event types: `update.done`, `update.rolled_back`, `update.failed` (nothing was
 stopped), `version.available` (notify mode), `gate.refused`, `registry.failing`,
@@ -333,14 +336,17 @@ stopped), `version.available` (notify mode), `gate.refused`, `registry.failing`,
   the updater's env. `BOSUN_HOST` on the gate overrides it.
 - `steps` come from the gate. The `update` reply gets a `steps` list with name, status,
   time and a short detail for each step of the update sequence.
+- `update.failed` has no `steps`: when the gate returns an error instead of a result,
+  there is no honest step list, and the `reason` says what failed.
 - `command_id` is set when a command caused the event.
 - The body never holds registry logins, notify URLs or env vars.
 
 Sending rules:
 
-- The updater tries 3 times, waiting 5 s, 30 s, then 2 min. Then it drops the event and
-  logs it. Events wait in memory only, so a restart loses events that are not sent.
-  The next round still works.
+- The updater tries up to four times: at once, then after 5 s, 30 s and 2 min. A bad
+  token or a bad request is not tried again. Then it drops the event and logs it.
+  Events wait in memory only, so a restart loses events that are not sent. The next
+  round still works.
 - A failed event never blocks an update. Same rule as notes.
 - Notes still go out as before. Events do not replace them.
 
@@ -357,6 +363,11 @@ Authorization: Bearer <token>
 The reply is a JSON list. Each command has fixed fields. Unknown fields or unknown
 commands are refused and logged, and they get a `command.result` event with
 `status: refused`.
+
+The updater refuses a command list longer than 100, a body over 64 KB, an unknown
+field, an id that is not 1-128 plain characters, a `check` with a container, and a
+`skip_clear` whose container is not a valid container name. The gate checks the name
+again and logs `REFUSED`.
 
 | Command | Fields | Does |
 |---|---|---|
