@@ -59,8 +59,9 @@ touched.
 | `BOSUN_BACKUP_WARN_SIZE` | `10GB` | A backup bigger than this adds a one-time warning to the update note. |
 | `BOSUN_CONTROL_URL` | none | Base URL of the control server. Off when not set. `https://` only, unless `BOSUN_CONTROL_INSECURE=true`. |
 | `BOSUN_CONTROL_TOKEN_FILE` | `/etc/bosun/control-token` | File with the bearer token. Must be under `/etc/bosun`. |
-| `BOSUN_CONTROL_COMMANDS` | `false` | Ask the server for commands. Events work without it. |
+| `BOSUN_CONTROL_COMMANDS` | `false` | Ask the server for commands. The value must be exactly `true`. Events work without it. |
 | `BOSUN_CONTROL_POLL` | `60s` | How often to ask. Lowest value `15s`. |
+| `BOSUN_CONTROL_INSECURE` | `false` | Allow a plain `http://` control server on your own LAN. The value must be exactly `true`. |
 | `BOSUN_HOST` | Docker host name | The host name in events and command polls. |
 
 Registry logins: mount a Docker `config.json` at `/etc/bosun/docker/config.json`. Use a
@@ -115,6 +116,9 @@ events and asks for the commands. The server never connects to Bosun.
     volumes:
       - ./control-token:/etc/bosun/control-token:ro
 ```
+
+The token file holds the server's bearer token and must not be empty: an
+empty file stops Bosun at start-up with a message saying so.
 
 Events are JSON, one per thing that happened: `update.done`,
 `update.rolled_back`, `update.failed`, `version.available`, `gate.refused`,
