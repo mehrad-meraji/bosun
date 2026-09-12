@@ -157,6 +157,7 @@ func TestUpdateRevertSkipAndRollback(t *testing.T) {
 // proves Docker's chunk headers are stripped.
 func TestFailedUpdateLogsComeBack(t *testing.T) {
 	g, name := setup(t)
+	g.ControlLink = true // nothing is read with no control server to send to
 	push(t, v1)
 	runApp(t, name, "--label", "bosun.logs=true")
 
