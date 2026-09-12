@@ -43,6 +43,7 @@ Do not set `hostname` or `user` on the gate. It finds its own container by hostn
 | `bosun.mode=notify` | `update` | Tell only. Do not update. |
 | `bosun.health-timeout=120s` | `60s` | How long a new version has to become healthy. |
 | `bosun.backup=true` | off | Copy the container's writable volumes before each update. |
+| `bosun.logs=true` | off | Send this container's last output to the control server when an update fails. |
 
 Bosun follows the tag. `postgres:16` stays on 16. Images pinned by digest are never
 touched.
@@ -128,6 +129,25 @@ registry logins, no notify URLs and no env vars.
 There are two commands, and no others: `check` runs a round now, and
 `skip_clear` lets a container try a skipped version again. A hacked server
 cannot pick an image, roll back, or touch your data.
+
+### Why an update failed
+
+When an update rolls back, Bosun deletes the new container seconds later, and
+its output goes with it. Put `bosun.logs=true` on a container and Bosun reads
+the last 50 lines (up to 4 KB) of that container first and sends them with the
+`update.rolled_back` event. The same happens when Bosun restarts after a crash
+and throws away a new version that is not healthy: the lines wait in Bosun's
+state file until the updater collects them.
+
+This is off for every container until you turn it on, one container at a time,
+because **app output can hold secrets**. Nothing is hidden or removed from the
+lines. Turn it on only for apps whose output you are happy to send to your
+control server.
+
+The lines never go anywhere else: not into a Slack or Teams note, not into the
+`bosun` commands, not into Bosun's own log. Bosun does not collect logs from a
+running container; that is your log tool's job, and Docker can send container
+output straight to it with a log driver.
 
 Events wait in memory only. If the updater restarts, events that did not go
 out are lost; the next round still works.

@@ -226,6 +226,7 @@ label.
 | `bosun.mode=notify` | `update` | Tell only. Do not update. |
 | `bosun.backup=true` | off | Back up volumes before each update. |
 | `bosun.health-timeout=120s` | `60s` | How long to wait for healthy. |
+| `bosun.logs=true` | off | Send this container's last output to the control server when an update fails. |
 
 ### Settings on the gate
 
@@ -339,6 +340,13 @@ stopped), `version.available` (notify mode), `gate.refused`, `registry.failing`,
 - `update.failed` has no `steps`: when the gate returns an error instead of a result,
   there is no honest step list, and the `reason` says what failed.
 - `command_id` is set when a command caused the event.
+- `logs` holds the last 50 lines (up to 4 KB) of a container Bosun threw away, and only
+  for a container with `bosun.logs=true`. It is set on `update.rolled_back`, and on a
+  `recovery` event when crash recovery removed an unhealthy new version. Bosun reads it
+  before the container is deleted, because nothing can read it afterwards. Nothing is
+  redacted: the label is the consent. The lines go to the control server only — never to
+  a note, the CLI or the gate log. Bosun never collects the output of a running
+  container; a log tool or a Docker log driver does that.
 - The body never holds registry logins, notify URLs or env vars.
 
 Sending rules:

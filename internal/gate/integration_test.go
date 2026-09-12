@@ -29,6 +29,8 @@ const (
 	v2     = "FROM busybox:1.36\nRUN echo v2 > /version\nCMD [\"sleep\", \"3600\"]\n"
 	broken = "FROM busybox:1.36\nRUN echo broken > /version\nCMD [\"false\"]\n"
 	newCmd = "FROM busybox:1.36\nRUN echo v2 > /version\nCMD [\"sleep\", \"7200\"]\n"
+	// noisy fails like broken, but says why first, on stderr and with no TTY.
+	noisy = "FROM busybox:1.36\nRUN echo noisy > /version\nCMD [\"sh\", \"-c\", \"echo 'boom: no such table' >&2; exit 1\"]\n"
 )
 
 func sh(t *testing.T, name string, args ...string) string {
@@ -146,6 +148,28 @@ func TestUpdateRevertSkipAndRollback(t *testing.T) {
 	}
 	if out := sh(t, "docker", "ps", "-a", "--filter", "name="+name+"-bosun-", "-q"); out != "" {
 		t.Fatalf("old containers left behind: %s", out)
+	}
+}
+
+// With bosun.logs=true, a rolled-back update brings back the dead
+// container's output. Docker deletes that container seconds later, so this
+// is the only chance to read it. The container has no TTY, so this also
+// proves Docker's chunk headers are stripped.
+func TestFailedUpdateLogsComeBack(t *testing.T) {
+	g, name := setup(t)
+	push(t, v1)
+	runApp(t, name, "--label", "bosun.logs=true")
+
+	d := push(t, noisy)
+	res, err := g.Update(context.Background(), name, d, "")
+	if err != nil || res.Status != gate.StatusReverted {
+		t.Fatalf("update: %+v %v", res, err)
+	}
+	if !strings.Contains(res.Logs, "boom: no such table") {
+		t.Fatalf("Logs = %q, want the failed container's own words", res.Logs)
+	}
+	if v := version(t, name); v != "v1" {
+		t.Fatalf("running %s, want v1 back", v)
 	}
 }
 
