@@ -63,6 +63,7 @@ The updater must label every event with the host and must tell a gate refusal (4
 - Produces:
   - `sock.HTTPError{Status int; Msg string}` with `Error() string` returning `Msg`.
   - `gate.IsRefused(err error) bool` — true for a gate 403.
+  - `gate.IsBusy(err error) bool` — true for `state.ErrBusy` or a gate 409.
   - `(*docker.Client).Info(ctx context.Context) (string, error)` — the Docker host name.
   - `gate.updaterBody(self *docker.Container, dir, host string) map[string]any` — third parameter is new.
 
@@ -195,6 +196,17 @@ func IsRefused(err error) bool {
 	}
 	var he *sock.HTTPError
 	return errors.As(err, &he) && he.Status == http.StatusForbidden
+}
+
+// IsBusy reports whether the gate was busy with an update. The caller may
+// try again later, so it is not a failure. Over the socket it arrives as a
+// 409, like the updater's own busy reply.
+func IsBusy(err error) bool {
+	if errors.Is(err, state.ErrBusy) {
+		return true
+	}
+	var he *sock.HTTPError
+	return errors.As(err, &he) && he.Status == http.StatusConflict
 }
 ```
 
@@ -348,6 +360,25 @@ func TestServeSkipClear(t *testing.T) {
 		t.Errorf("err = %v, want the client to see a refusal", err)
 	}
 }
+
+// A busy gate must read as busy through the socket too, not as a failure:
+// the control server drops a failed command but retries a busy one.
+func TestServeSkipClearIsBusyOverTheSocket(t *testing.T) {
+	f := swapFake(true)
+	g := f.gate(t)
+	lock, _, err := state.Open(g.Dir, true) // hold the lock, like a running update
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	c, stop := serveGate(t, g)
+	defer stop()
+
+	_, err = c.SkipClear(context.Background(), "app")
+	if !IsBusy(err) {
+		t.Errorf("err = %v, want IsBusy", err)
+	}
+}
 ```
 
 `serveGate` does not exist yet. Add it to `internal/gate/rpc_test.go`:
@@ -445,6 +476,15 @@ In `Serve`, after the `/update` handler:
 	})
 ```
 
+In `internal/gate/rpc.go`, in `reply`, add the busy case before the plain error case, so a busy gate is a 409 and not a 500:
+
+```go
+	case errors.Is(err, state.ErrBusy):
+		http.Error(w, err.Error(), http.StatusConflict)
+```
+
+Without it, `gate.IsBusy` can never see a busy gate over the socket, and the control server would be told a command failed when it should try again.
+
 and the client method next to `Update`:
 
 ```go
@@ -469,7 +509,7 @@ In `cli.go`, replace the body of the `case len(pos) == 2 && pos[0] == "clear":` 
 		return nil
 ```
 
-`cmdSkip` now needs no `state.Open`; drop imports that go unused. The old text said "nothing is skipped for X" as an error; the new message is not an error, which is what the control server needs too.
+`cmdSkip` now needs no `state.Open`; drop imports that go unused. The old text said "nothing is skipped for X" as an error; the new message is not an error, which is what the control server needs too. Update any `cli_test.go` case that expected that error.
 
 - [ ] **Step 5: Run the tests**
 
@@ -781,6 +821,9 @@ func TestNewRefusesPlainHTTPAndBadSettings(t *testing.T) {
 			t.Errorf("%s: want an error", tc.name)
 		}
 	}
+	if _, err := New("https://server", tok, "", false); err == nil {
+		t.Error("no host name: want an error, or every event goes out with an empty host")
+	}
 	if _, err := New("http://server", tok, "h", true); err != nil {
 		t.Errorf("plain http with insecure = %v, want ok", err)
 	}
@@ -1026,6 +1069,9 @@ func New(rawURL, tokenFile, host string, insecure bool) (*Client, error) {
 	token := strings.TrimSpace(string(b))
 	if token == "" {
 		return nil, fmt.Errorf("the control token file %s is empty; put the server's token in it", tokenFile)
+	}
+	if host == "" {
+		return nil, fmt.Errorf("the control link needs a host name, and Docker gave none; set BOSUN_HOST on bosun-gate")
 	}
 	return &Client{
 		url:   strings.TrimSuffix(rawURL, "/"),
@@ -2096,7 +2142,7 @@ func TestRunCommandSkipClear(t *testing.T) {
 
 func TestRunCommandSkipClearBusyAndRefused(t *testing.T) {
 	u, g, _ := setup(nil, fakeReg{})
-	g.clearErr = state.ErrBusy
+	g.clearErr = state.ErrBusy // the gate's own error; over the socket it is a 409, which gate.IsBusy also reads
 	if status, _ := u.runCommand(context.Background(), control.Command{ID: "c1", Type: control.CmdSkipClear, Container: "app"}); status != "busy" {
 		t.Errorf("status = %q, want busy", status)
 	}
@@ -2217,7 +2263,7 @@ func (u *Updater) runCommand(ctx context.Context, c control.Command) (string, st
 	case control.CmdSkipClear:
 		res, err := u.Gate.SkipClear(ctx, c.Container)
 		switch {
-		case errors.Is(err, state.ErrBusy):
+		case gate.IsBusy(err):
 			return "busy", err.Error()
 		case gate.IsRefused(err):
 			return "refused", err.Error()
@@ -2230,13 +2276,7 @@ func (u *Updater) runCommand(ctx context.Context, c control.Command) (string, st
 }
 ```
 
-Add `"fmt"` to the imports. `state.ErrBusy` arrives from the gate as text, not as a wrapped error, so also treat a `*sock.HTTPError` with status 409 as busy if the gate ever returns one — it does not today, so leave the simple check and note it with a comment:
-
-```go
-	// ponytail: the gate's busy error comes back as text over the socket, so a
-	// real busy from another process reads as "failed" until the RPC carries a
-	// status. Both make the server try again later.
-```
+Add `"fmt"` to the imports, and drop `state` from them if nothing else in the file uses it: `gate.IsBusy` (Task 1) covers both the direct error and the gate's 409.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -2270,6 +2310,8 @@ Add to `checkSettings`, so the gate refuses bad link settings at start instead o
 			return err
 		}
 		// The same check the updater makes, so a bad URL or token stops the gate.
+		// The host is a stand-in here: the gate only learns the real one when
+		// it starts the updater, and the updater checks it for real.
 		if _, err := control.New(controlURL, controlToken, "check", controlInsecure); err != nil {
 			return err
 		}
@@ -2479,3 +2521,4 @@ git commit -m "Docs: the control server link"
 - **No retry queue on disk.** The spec says events live in memory only.
 - **No remote `update`, `rollback` or restore.** On purpose, for good.
 - **No event for every registry failure.** One event when a registry has failed three rounds in a row, the same rule as the notes.
+- **No `warning` event of its own.** The big-backup warning rides in the `update.done` message. The `warning` type is used only for a gate event whose kind Bosun does not know.
