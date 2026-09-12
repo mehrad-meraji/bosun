@@ -292,3 +292,73 @@ func TestGateEventsGoOutAsEvents(t *testing.T) {
 		t.Fatalf("events = %+v, want one recovery event", evs)
 	}
 }
+
+// queued turns the link on with a queue the test reads, and no server: no
+// event leaves the machine.
+func queued(t *testing.T, u *Updater) {
+	t.Helper()
+	u.Control = controlClient(t, "https://control.invalid")
+	u.evs = make(chan control.Event, eventQueue)
+}
+
+// drain reads every event waiting in the queue.
+func drain(u *Updater) []control.Event {
+	var out []control.Event
+	for {
+		select {
+		case ev := <-u.evs:
+			out = append(out, ev)
+		default:
+			return out
+		}
+	}
+}
+
+// The gate's queued events were not caused by the command that happened to
+// run the round: a crash recovery from hours earlier is its own news.
+func TestGateEventsCarryNoCommandID(t *testing.T) {
+	u, g, _ := setup(web("update", []string{"sha256:old"}, nil), fakeReg{digest: "sha256:new"})
+	queued(t, u)
+	g.events = []state.Event{{Kind: "recovered", Name: "app", Message: "app: the old version is back"}}
+	if _, err := u.round(context.Background(), false, "cmd-1"); err != nil {
+		t.Fatal(err)
+	}
+	var saw bool
+	for _, ev := range drain(u) {
+		switch ev.Type {
+		case control.EventRecovery:
+			saw = true
+			if ev.CommandID != "" {
+				t.Errorf("a gate event must carry no command id: %+v", ev)
+			}
+		case control.EventUpdateDone:
+			if ev.CommandID != "cmd-1" {
+				t.Errorf("the update the command caused must carry its id: %+v", ev)
+			}
+		}
+	}
+	if !saw {
+		t.Error("no recovery event was sent")
+	}
+}
+
+// An event's time is when it happened, not when a slow server finally took
+// it. A gate event keeps the gate's own time.
+func TestEmitStampsTheTimeItHappened(t *testing.T) {
+	u, _, _ := setup(nil, fakeReg{})
+	queued(t, u)
+	before := time.Now().UTC()
+	u.emit(resultEvent("c1", "done", "checked 0 containers"))
+	when := time.Date(2026, 9, 11, 4, 0, 0, 0, time.UTC)
+	u.emit(gateEvent(state.Event{Time: when, Kind: "recovered", Name: "app", Message: "back"}, ""))
+	evs := drain(u)
+	if len(evs) != 2 {
+		t.Fatalf("events = %+v, want two", evs)
+	}
+	if evs[0].Time.Before(before) || evs[0].Time.After(time.Now().UTC()) {
+		t.Errorf("time = %v, want the moment it was queued", evs[0].Time)
+	}
+	if !evs[1].Time.Equal(when) {
+		t.Errorf("time = %v, want the gate's own time %v", evs[1].Time, when)
+	}
+}

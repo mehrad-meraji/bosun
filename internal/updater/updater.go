@@ -56,7 +56,7 @@ type Updater struct {
 var ErrBusy = errors.New("a round is running, try again later")
 
 // eventQueue is how many events wait to go out. A slow server must never
-// hold up an update, so a full queue drops the oldest news: the log keeps it.
+// hold up an update, so a full queue drops the newest news: the log keeps it.
 const eventQueue = 100
 
 // StartEvents starts the one goroutine that sends events. It does nothing
@@ -80,10 +80,15 @@ func (u *Updater) StartEvents(ctx context.Context) {
 	}()
 }
 
-// emit queues one event. It never blocks and never fails an update.
+// emit queues one event. It never blocks and never fails an update. The
+// time is stamped here, when the thing happened: a slow server must not be
+// able to move a timestamp minutes later.
 func (u *Updater) emit(ev control.Event) {
 	if u.Control == nil || u.evs == nil {
 		return
+	}
+	if ev.Time.IsZero() {
+		ev.Time = time.Now().UTC()
 	}
 	select {
 	case u.evs <- ev:
@@ -162,12 +167,14 @@ func (u *Updater) round(ctx context.Context, dryRun bool, cmdID string) ([]strin
 		}
 	}
 	if !dryRun {
-		u.sendEvents(ctx, cmdID)
+		// The gate's queued events are its own news, from hours earlier at
+		// times; no command caused them, so they carry no command id.
+		u.sendEvents(ctx)
 	}
 	return lines, nil
 }
 
-func (u *Updater) sendEvents(ctx context.Context, cmdID string) {
+func (u *Updater) sendEvents(ctx context.Context) {
 	evs, err := u.Gate.Events(ctx)
 	if err != nil {
 		log.Printf("read gate events: %v", err)
@@ -175,7 +182,7 @@ func (u *Updater) sendEvents(ctx context.Context, cmdID string) {
 	}
 	for _, e := range evs {
 		u.Notify(e.Message)
-		u.emit(gateEvent(e, cmdID))
+		u.emit(gateEvent(e, ""))
 	}
 }
 
@@ -185,7 +192,7 @@ func (u *Updater) Run(ctx context.Context, schedule string) error {
 	if err != nil {
 		return fmt.Errorf("BOSUN_SCHEDULE %q: %w", schedule, err)
 	}
-	u.sendEvents(ctx, "")
+	u.sendEvents(ctx)
 	for {
 		select {
 		case <-ctx.Done():
