@@ -183,8 +183,8 @@ func Clear(dir string) error {
 // ponytail: devices, fifos and sockets are skipped; app volumes rarely hold them.
 func Extract(r io.Reader, dest string) error {
 	type dirTime struct {
-		rel string    // relative path (for safeParent check)
-		path string   // absolute path
+		rel  string // relative path (for safeParent check)
+		path string // absolute path
 		t    time.Time
 	}
 	var dirs []dirTime

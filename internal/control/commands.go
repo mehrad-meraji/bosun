@@ -35,7 +35,7 @@ type Refusal struct {
 }
 
 const (
-	maxCommands = 100     // more than this in one reply is not a real list
+	maxCommands = 100 // more than this in one reply is not a real list
 	maxBody     = 64 << 10
 	replayFor   = 24 * time.Hour
 	maxSeen     = 10000 // ponytail: a flat cap; if a server ever floods unique IDs, the map is cleared and a replay costs at most one extra round
