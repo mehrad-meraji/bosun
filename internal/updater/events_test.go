@@ -86,3 +86,23 @@ func TestResultEvent(t *testing.T) {
 		t.Errorf("event = %+v", ev)
 	}
 }
+
+// A rolled-back update's event carries the dead container's last output when
+// the gate read it, and nothing when it did not.
+func TestUpdateEventCarriesTheFailedLogs(t *testing.T) {
+	res := gate.Result{Status: gate.StatusReverted, Logs: "boom: no such table"}
+	if ev := updateEvent(w1, "sha256:new", res, ""); ev.Logs != "boom: no such table" {
+		t.Errorf("Logs = %q, want the tail", ev.Logs)
+	}
+	if ev := updateEvent(w1, "sha256:new", gate.Result{Status: gate.StatusDone}, ""); ev.Logs != "" {
+		t.Errorf("Logs = %q, want none", ev.Logs)
+	}
+}
+
+// A recovery event carries the tail the gate parked in its state file.
+func TestGateEventCarriesTheFailedLogs(t *testing.T) {
+	e := state.Event{Kind: "recovered", Name: "app", Message: "app: the old version is back", Logs: "boom: migration failed"}
+	if ev := gateEvent(e, ""); ev.Logs != "boom: migration failed" {
+		t.Errorf("Logs = %q, want the tail", ev.Logs)
+	}
+}

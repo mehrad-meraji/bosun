@@ -28,6 +28,7 @@ const (
 	LabelTimeout = "bosun.health-timeout"
 	LabelManaged = "bosun.managed-by"
 	LabelBackup  = "bosun.backup"
+	LabelLogs    = "bosun.logs"
 	UpdaterName  = "bosun-updater"
 
 	StatusDone     = "done"
@@ -70,6 +71,9 @@ type Result struct {
 	BackupBytes int64         `json:"backup_bytes,omitempty"` // size of the backup
 	Message     string        `json:"message"`
 	Steps       []Step        `json:"steps,omitempty"`
+	// Logs: the last output of the container that failed, for the control
+	// server only. Empty unless the container has bosun.logs=true.
+	Logs string `json:"logs,omitempty"`
 }
 
 // Step is one step of an update, for the control server link. The CLI does
@@ -383,6 +387,21 @@ type swapOpts struct {
 	steps       *stepper
 }
 
+// failedLogs reads the last output of a container Bosun is about to throw
+// away, for containers with bosun.logs=true. The container is deleted
+// seconds later, so nobody else can read it. It is sent to the control
+// server only, never to a note: app output can hold secrets.
+func (g *Gate) failedLogs(ctx context.Context, c *docker.Container, id string) string {
+	if id == "" || c.Config.Labels[LabelLogs] != "true" {
+		return ""
+	}
+	out, err := g.D.Logs(ctx, id)
+	if err != nil {
+		log.Printf("%s: read the failed container's logs: %v", strings.TrimPrefix(c.Name, "/"), err)
+	}
+	return out
+}
+
 // swap replaces old with a new container running ref, then waits for it to
 // be healthy. If anything fails after the old one stops, it puts the old one
 // back and returns StatusReverted.
@@ -473,6 +492,8 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 		}
 	}
 	if err != nil {
+		// Read the logs before the revert deletes the container.
+		failed := g.failedLogs(ctx, old, newID)
 		if renamed, rerr := g.revert(ctx, old.ID, newID, name, !opts.keepStopped); rerr != nil {
 			// revert failed; keep Pending in state so Recover can fix it on next gate start
 			keepPending = true
@@ -486,7 +507,7 @@ func (g *Gate) swap(ctx context.Context, f *state.File, st *state.State, old *do
 			return Result{}, fmt.Errorf("%s: new version failed (%v) and putting the old one back failed: %w. The old container is stopped as %s; restart bosun-gate to recover it, or rename it back to %s and start it", name, err, rerr, p.TmpName, name)
 		}
 		opts.steps.add("rollback", "ok", "")
-		return Result{Status: StatusReverted, Downtime: time.Since(t0), Steps: opts.steps.steps(),
+		return Result{Status: StatusReverted, Downtime: time.Since(t0), Steps: opts.steps.steps(), Logs: failed,
 			Message: fmt.Sprintf("%s: new version failed (%v); the old version is back", name, err)}, nil
 	}
 	if err := g.D.Remove(ctx, old.ID, true); err != nil {

@@ -24,7 +24,7 @@ func (g *Gate) Recover(ctx context.Context) error {
 	// Keep only the records whose recovery failed; remove successful ones
 	var failed []state.Pending
 	for _, p := range st.Pending {
-		msg, err := g.recoverOne(ctx, st, p)
+		msg, logs, err := g.recoverOne(ctx, st, p)
 		if err != nil {
 			if p.KeepStopped {
 				msg = fmt.Sprintf("%s: recovery of a rollback with data failed: %v. The old container may be stopped as %s; do not start it on this data. Rename it back to %s and run `bosun rollback %s --with-data` again.", p.Name, err, p.TmpName, p.Name, p.Name)
@@ -33,65 +33,71 @@ func (g *Gate) Recover(ctx context.Context) error {
 			}
 			failed = append(failed, p)
 		}
-		st.AddEvent("recovered", p.Name, msg)
+		st.AddEventLogs("recovered", p.Name, msg, logs)
 	}
 	st.Pending = failed
 	return f.Save(st)
 }
 
-func (g *Gate) recoverOne(ctx context.Context, st *state.State, p state.Pending) (string, error) {
+// recoverOne finishes one cut-off swap. It returns the event message and, for
+// a container with bosun.logs=true that it threw away, that container's last
+// output.
+func (g *Gate) recoverOne(ctx context.Context, st *state.State, p state.Pending) (string, string, error) {
+	var logs string // the failed container's last output, if it had the label
 	// Check if the old container still exists
 	old, oldErr := g.D.Inspect(ctx, p.OldID)
 	if oldErr != nil && !docker.IsNotFound(oldErr) {
-		return "", oldErr
+		return "", "", oldErr
 	}
 	if docker.IsNotFound(oldErr) {
 		// Old container is gone. Check what's at p.Name now.
 		cur, err := g.D.Inspect(ctx, p.Name)
 		if err != nil && !docker.IsNotFound(err) {
-			return "", err
+			return "", "", err
 		}
 		if docker.IsNotFound(err) {
 			// Neither old nor new container exists - this is a problem
-			return "", fmt.Errorf("both old container %s and current container %s are missing", p.OldID, p.Name)
+			return "", "", fmt.Errorf("both old container %s and current container %s are missing", p.OldID, p.Name)
 		}
 		// A container is running at p.Name; keep it and start it if stopped,
 		// unless its mounts hold restored backup data that must never run.
 		if !cur.State.Running {
 			if p.KeepStopped {
-				return p.Name + ": an update was cut off; the old container was already gone, and the current one is stopped", nil
+				return p.Name + ": an update was cut off; the old container was already gone, and the current one is stopped", "", nil
 			}
-			return p.Name + ": an update was cut off; the old container was already gone, so the current one was kept", g.D.Start(ctx, cur.ID)
+			return p.Name + ": an update was cut off; the old container was already gone, so the current one was kept", "", g.D.Start(ctx, cur.ID)
 		}
-		return p.Name + ": an update was cut off; the old container was already gone, so the current one was kept", nil
+		return p.Name + ": an update was cut off; the old container was already gone, so the current one was kept", "", nil
 	}
 
 	// Old container exists. Check the container at p.Name
 	cur, err := g.D.Inspect(ctx, p.Name)
 	switch {
 	case err != nil && !docker.IsNotFound(err):
-		return "", err
+		return "", "", err
 	case err == nil && cur.ID == p.OldID:
 		// Stopped or crashed before the rename. Nothing changed but the stop
 		// and the tag, which the pull or rollback moved.
 		if p.KeepStopped {
-			return fmt.Sprintf("%s: a rollback with data was cut off; the data is from the backup, and %s is stopped. Run `bosun rollback %s --with-data` again", p.Name, p.Name, p.Name), nil
+			return fmt.Sprintf("%s: a rollback with data was cut off; the data is from the backup, and %s is stopped. Run `bosun rollback %s --with-data` again", p.Name, p.Name, p.Name), "", nil
 		}
 		g.retag(ctx, old.Image, old.Config.Image)
-		return p.Name + ": an update was cut off before it changed anything; the container is running again", g.D.Start(ctx, p.OldID)
+		return p.Name + ": an update was cut off before it changed anything; the container is running again", "", g.D.Start(ctx, p.OldID)
 	case err == nil && cur.State.Running && g.waitHealthy(ctx, cur.ID, timeoutOf(cur)) == nil:
 		if err := g.D.Remove(ctx, p.OldID, true); err != nil && !docker.IsNotFound(err) {
-			return "", err
+			return "", "", err
 		}
 		g.kept(ctx, st.Entry(p.Name), p, old.Image)
-		return p.Name + ": an update was cut off; the new version is running and was kept", nil
+		return p.Name + ": an update was cut off; the new version is running and was kept", "", nil
 	case err == nil:
+		// Read the logs before the container is thrown away.
+		logs = g.failedLogs(ctx, cur, cur.ID)
 		if err := g.D.Remove(ctx, cur.ID, true); err != nil {
-			return "", err
+			return "", "", err
 		}
 	}
 	if err := g.D.Rename(ctx, p.OldID, p.Name); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if p.Digest != "" {
 		st.Entry(p.Name).AddSkip(p.Digest)
@@ -99,10 +105,10 @@ func (g *Gate) recoverOne(ctx context.Context, st *state.State, p state.Pending)
 	if p.KeepStopped {
 		// The volumes hold the restored (old) data, so the tag must stay on
 		// the old image; do not point it back at the newer one.
-		return fmt.Sprintf("%s: a rollback with data was cut off; %s is stopped with the backup's data. Run `bosun rollback %s --with-data` again", p.Name, p.Name, p.Name), nil
+		return fmt.Sprintf("%s: a rollback with data was cut off; %s is stopped with the backup's data. Run `bosun rollback %s --with-data` again", p.Name, p.Name, p.Name), logs, nil
 	}
 	g.retag(ctx, old.Image, old.Config.Image)
-	return p.Name + ": an update was cut off; the old version is back", g.D.Start(ctx, p.OldID)
+	return p.Name + ": an update was cut off; the old version is back", logs, g.D.Start(ctx, p.OldID)
 }
 
 // kept does the bookkeeping for a cut-off swap whose new container stays,

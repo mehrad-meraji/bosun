@@ -471,3 +471,28 @@ func TestSpawnUpdaterCarriesOnWithoutAHostWhenTheLinkIsOff(t *testing.T) {
 		t.Errorf("the updater must still be created and started; calls: %v", f.calls)
 	}
 }
+
+// Crash recovery throws away an unhealthy new container too. With
+// bosun.logs=true its last output waits in the state file until the updater
+// collects it.
+func TestRecoverKeepsTheFailedLogs(t *testing.T) {
+	f := recoverFake(false, "") // new container exists, fails the health wait
+	withLogs(f, "boom: migration failed\n")
+	g := f.gate(t)
+	st := recoverApp(t, g, state.Entry{}, "sha256:d2")
+	if st.Events[0].Logs != "boom: migration failed" {
+		t.Errorf("event logs = %q, want the tail of the failed container", st.Events[0].Logs)
+	}
+	if !f.calledAfter(logsCall, "DELETE /containers/new-id?force=1&v=0") {
+		t.Errorf("logs must be read before the new container is removed; calls: %v", f.calls)
+	}
+}
+
+func TestRecoverSendsNoLogsWithoutTheLabel(t *testing.T) {
+	f := recoverFake(false, "")
+	g := f.gate(t)
+	st := recoverApp(t, g, state.Entry{}, "sha256:d2")
+	if st.Events[0].Logs != "" || f.called(logsCall) {
+		t.Errorf("logs = %q, calls %v; want none without the label", st.Events[0].Logs, f.calls)
+	}
+}

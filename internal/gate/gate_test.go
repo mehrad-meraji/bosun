@@ -502,3 +502,70 @@ func TestListSkipsVanishedContainer(t *testing.T) {
 		t.Fatalf("List = %+v %v, want only app", ws, err)
 	}
 }
+
+// logsCall is the request Bosun makes to read a failed container's output.
+const logsCall = "GET /containers/new-id/logs?stderr=1&stdout=1&tail=50"
+
+// withLogs turns on bosun.logs for every container the fake knows, and makes
+// the new container print a line before it dies. A recreated container keeps
+// the old one's labels, so in real life both carry it.
+func withLogs(f *dockerFake, tail string) {
+	for k, v := range f.containers {
+		f.containers[k] = strings.Replace(v, `"Labels":{`, `"Labels":{"bosun.logs":"true",`, 1)
+	}
+	if f.replies == nil {
+		f.replies = map[string]string{}
+	}
+	f.replies["GET /containers/new-id/logs"] = tail
+}
+
+// A rolled-back update carries the dead container's last output, so the
+// control server can say why it failed. The container is gone seconds
+// later, so nobody else can read it.
+func TestRevertedUpdateCarriesTheFailedLogs(t *testing.T) {
+	f := swapFake(false)
+	withLogs(f, "boom: no such table\n")
+	g := f.gate(t)
+	res, err := g.Update(context.Background(), "app", "sha256:d2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Logs != "boom: no such table" {
+		t.Errorf("Logs = %q, want the tail of the failed container", res.Logs)
+	}
+	// The logs must be read before the container is thrown away.
+	if !f.calledAfter(logsCall, "DELETE /containers/new-id?force=1&v=0") {
+		t.Errorf("logs must be read before the new container is removed; calls: %v", f.calls)
+	}
+}
+
+// Without the label, nothing is read and nothing is sent.
+func TestRevertedUpdateSendsNoLogsWithoutTheLabel(t *testing.T) {
+	f := swapFake(false)
+	g := f.gate(t)
+	res, err := g.Update(context.Background(), "app", "sha256:d2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Logs != "" {
+		t.Errorf("Logs = %q, want none: bosun.logs is off", res.Logs)
+	}
+	if f.called(logsCall) {
+		t.Errorf("must not read logs without the label; calls: %v", f.calls)
+	}
+}
+
+// A good update sends no logs: that container is running, and its output is
+// the log feature's job, not Bosun's.
+func TestGoodUpdateSendsNoLogs(t *testing.T) {
+	f := swapFake(true)
+	withLogs(f, "all good\n")
+	g := f.gate(t)
+	res, err := g.Update(context.Background(), "app", "sha256:d2", "")
+	if err != nil || res.Status != StatusDone {
+		t.Fatalf("Update = %+v, %v", res, err)
+	}
+	if res.Logs != "" || f.called(logsCall) {
+		t.Errorf("Logs = %q, calls %v; want none for a healthy update", res.Logs, f.calls)
+	}
+}

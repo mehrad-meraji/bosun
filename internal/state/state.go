@@ -47,6 +47,9 @@ type Event struct {
 	Kind    string    `json:"kind"`
 	Name    string    `json:"name"`
 	Message string    `json:"message"`
+	// Logs: the last output of a container Bosun threw away. Only for
+	// containers with bosun.logs=true, and only for the control server.
+	Logs string `json:"logs,omitempty"`
 }
 
 var ErrBusy = errors.New("bosun is busy with an update, try again later")
@@ -129,7 +132,13 @@ func (s *State) Entry(name string) *Entry {
 }
 
 func (s *State) AddEvent(kind, name, msg string) {
-	s.Events = append(s.Events, Event{Time: time.Now().UTC(), Kind: kind, Name: name, Message: msg})
+	s.AddEventLogs(kind, name, msg, "")
+}
+
+// AddEventLogs queues an event that also carries the last output of a
+// container Bosun threw away.
+func (s *State) AddEventLogs(kind, name, msg, logs string) {
+	s.Events = append(s.Events, Event{Time: time.Now().UTC(), Kind: kind, Name: name, Message: msg, Logs: logs})
 }
 
 func (e *Entry) AddSkip(digest string) {

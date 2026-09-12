@@ -25,6 +25,7 @@ func updateEvent(w gate.Watched, digest string, res gate.Result, cmdID string) c
 		DowntimeMs: res.Downtime.Milliseconds(),
 		Steps:      res.Steps,
 		CommandID:  cmdID,
+		Logs:       res.Logs,
 	}
 	if res.Status == gate.StatusReverted {
 		ev.Type = control.EventUpdateRolledBack
@@ -90,6 +91,7 @@ func gateEvent(e state.Event, cmdID string) control.Event {
 		Container: e.Name,
 		Reason:    e.Message,
 		CommandID: cmdID,
+		Logs:      e.Logs,
 	}
 }
 

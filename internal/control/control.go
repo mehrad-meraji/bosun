@@ -65,6 +65,10 @@ type Event struct {
 	Reason     string      `json:"reason,omitempty"`
 	Status     string      `json:"status,omitempty"` // command.result only: done, busy, refused or failed
 	CommandID  string      `json:"command_id,omitempty"`
+	// Logs: the last output of a container Bosun threw away, for containers
+	// with bosun.logs=true. It can hold anything the app printed, so it
+	// never goes into a note.
+	Logs string `json:"logs,omitempty"`
 }
 
 // Client sends events and reads commands. A nil Client means the link is off.
