@@ -63,6 +63,7 @@ type Event struct {
 	Backup     *Backup     `json:"backup,omitempty"`
 	Steps      []gate.Step `json:"steps,omitempty"`
 	Reason     string      `json:"reason,omitempty"`
+	Status     string      `json:"status,omitempty"` // command.result only: done, busy, refused or failed
 	CommandID  string      `json:"command_id,omitempty"`
 }
 
