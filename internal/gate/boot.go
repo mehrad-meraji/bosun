@@ -139,7 +139,17 @@ func (g *Gate) SpawnUpdater(ctx context.Context) error {
 	if err := g.RemoveUpdaters(ctx); err != nil {
 		return err
 	}
-	id, err := g.D.Create(ctx, UpdaterName, updaterBody(self, g.RunDir))
+	// The host name labels every control-server event. Docker knows it; the
+	// user can override it with BOSUN_HOST on the gate.
+	host := ""
+	if !hasEnv(self.Config.Env, "BOSUN_HOST") {
+		if h, err := g.D.Info(ctx); err != nil {
+			log.Printf("read the Docker host name: %v; events will have no host", err)
+		} else {
+			host = h
+		}
+	}
+	id, err := g.D.Create(ctx, UpdaterName, updaterBody(self, g.RunDir, host))
 	if err != nil {
 		return err
 	}
@@ -150,7 +160,7 @@ func (g *Gate) SpawnUpdater(ctx context.Context) error {
 // ID (so a moved tag cannot swap it), no Docker socket, read-only, no
 // capabilities. It gets the shared run folder and read-only copies of the
 // gate's /etc/bosun mounts, and nothing else.
-func updaterBody(self *docker.Container, dir string) map[string]any {
+func updaterBody(self *docker.Container, dir, host string) map[string]any {
 	binds := []string{}
 	for _, m := range self.Mounts {
 		src := m.Source
@@ -172,6 +182,9 @@ func updaterBody(self *docker.Container, dir string) map[string]any {
 			env = append(env, e)
 		}
 	}
+	if host != "" {
+		env = append(env, "BOSUN_HOST="+host)
+	}
 	return map[string]any{
 		"Image":  self.Image,
 		"User":   "65532:65532", // distroless nonroot, the owner of gate.sock
@@ -187,6 +200,16 @@ func updaterBody(self *docker.Container, dir string) map[string]any {
 			"NetworkMode":    "bridge",
 		},
 	}
+}
+
+// hasEnv reports whether the list already sets key.
+func hasEnv(list []string, key string) bool {
+	for _, e := range list {
+		if strings.HasPrefix(e, key+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 // RemoveUpdaters removes every container the gate made.

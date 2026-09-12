@@ -69,6 +69,16 @@ func Serve(ctx context.Context, l net.Listener, h http.Handler) error {
 	return <-done
 }
 
+// HTTPError is a reply with a status other than 200. Msg is the reply text,
+// so an error reads the same as before; Status lets a caller tell a refusal
+// (403) from a failure (500).
+type HTTPError struct {
+	Status int
+	Msg    string
+}
+
+func (e *HTTPError) Error() string { return e.Msg }
+
 // Post sends in as JSON and decodes a 200 reply into out. Any other status
 // becomes an error holding the reply text.
 func Post(ctx context.Context, c *http.Client, url string, in, out any) error {
@@ -88,7 +98,7 @@ func Post(ctx context.Context, c *http.Client, url string, in, out any) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return errors.New(strings.TrimSpace(string(msg)))
+		return &HTTPError{Status: resp.StatusCode, Msg: strings.TrimSpace(string(msg))}
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 		return fmt.Errorf("read reply: %w", err)

@@ -100,6 +100,28 @@ func (g *Gate) takeEvents() ([]state.Event, error) {
 	return evs, f.Save(st)
 }
 
+// IsRefused reports whether the gate refused a call. The updater tells a
+// refusal from a failure this way, because they are different events.
+func IsRefused(err error) bool {
+	var ref *RefusedError
+	if errors.As(err, &ref) {
+		return true
+	}
+	var he *sock.HTTPError
+	return errors.As(err, &he) && he.Status == http.StatusForbidden
+}
+
+// IsBusy reports whether the gate was busy with an update. The caller may
+// try again later, so it is not a failure. Over the socket it arrives as a
+// 409, like the updater's own busy reply.
+func IsBusy(err error) bool {
+	if errors.Is(err, state.ErrBusy) {
+		return true
+	}
+	var he *sock.HTTPError
+	return errors.As(err, &he) && he.Status == http.StatusConflict
+}
+
 // Client calls the gate. The updater uses it.
 type Client struct{ http *http.Client }
 

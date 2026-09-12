@@ -178,6 +178,16 @@ func (c *Client) InspectImage(ctx context.Context, ref string) (*Image, error) {
 	return &img, nil
 }
 
+// Info returns the Docker host's name, which Bosun uses as the host name in
+// control-server events.
+func (c *Client) Info(ctx context.Context) (string, error) {
+	var out struct{ Name string }
+	if err := c.call(ctx, http.MethodGet, "/info", nil, nil, &out); err != nil {
+		return "", err
+	}
+	return out.Name, nil
+}
+
 // Pull pulls ref. auth is the X-Registry-Auth value, or "" for anonymous.
 // Docker reports pull errors inside a 200 stream, so the stream is read to
 // the end.

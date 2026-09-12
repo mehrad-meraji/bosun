@@ -108,7 +108,7 @@ func TestWatchedBadName(t *testing.T) {
 		strings.Repeat("a", 129), // too long
 	} {
 		_, _, err := g.watched(context.Background(), badName)
-		if err == nil || !isRefused(err) {
+		if err == nil || !IsRefused(err) {
 			t.Errorf("watched(%q) should refuse, got %v", badName, err)
 		}
 	}
@@ -137,7 +137,7 @@ func TestWatchedNameIDMismatch(t *testing.T) {
 
 	// Using the ID prefix should be refused (doesn't match the actual name "web")
 	_, _, err := g.watched(context.Background(), "abc123")
-	if err == nil || !isRefused(err) {
+	if err == nil || !IsRefused(err) {
 		t.Errorf("watched(id prefix) should refuse, got %v", err)
 	}
 	// Verify the error is specifically about the name/ID mismatch, not the label
@@ -163,11 +163,6 @@ func fakeGate(t *testing.T, h http.HandlerFunc) *Gate {
 	go srv.Serve(l)
 	t.Cleanup(func() { srv.Close() })
 	return &Gate{D: docker.New(p), Dir: dir}
-}
-
-func isRefused(err error) bool {
-	_, ok := err.(*RefusedError)
-	return ok
 }
 
 // dockerFake is a small Docker for swap tests. Containers and images are
@@ -336,7 +331,7 @@ func TestUpdateRefusesStoppedContainer(t *testing.T) {
 	f := swapFake(true)
 	f.containers["app"] = strings.Replace(oldCtr, `"Running":true`, `"Running":false`, 1)
 	_, err := f.gate(t).Update(context.Background(), "app", "sha256:d2", "")
-	if !isRefused(err) || !strings.Contains(err.Error(), "not running") {
+	if !IsRefused(err) || !strings.Contains(err.Error(), "not running") {
 		t.Fatalf("want a refusal, got %v", err)
 	}
 	if f.called("POST /images/create") {

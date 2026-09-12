@@ -166,3 +166,16 @@ func TestLogs(t *testing.T) {
 		t.Fatalf("Logs = %q, %v", out, err)
 	}
 }
+
+func TestInfoReadsTheHostName(t *testing.T) {
+	c := fake(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/"+APIVersion+"/info" {
+			t.Errorf("path = %s, want /info", r.URL.Path)
+		}
+		io.WriteString(w, `{"Name":"worker-1","OperatingSystem":"whatever"}`)
+	})
+	host, err := c.Info(context.Background())
+	if err != nil || host != "worker-1" {
+		t.Fatalf("Info = %q, %v, want worker-1", host, err)
+	}
+}

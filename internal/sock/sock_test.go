@@ -2,6 +2,7 @@ package sock
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -48,5 +49,33 @@ func TestServeWaitsForRunningCalls(t *testing.T) {
 	}
 	if err := <-served; err != nil {
 		t.Fatalf("Serve = %v", err)
+	}
+}
+
+func TestPostKeepsTheStatus(t *testing.T) {
+	dir, err := os.MkdirTemp("", "bs") // macOS caps socket paths at 104 bytes
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	path := filepath.Join(dir, "s.sock")
+	l, err := Listen(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /no", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "refused: bad name", http.StatusForbidden)
+	})
+	go func() { _ = Serve(context.Background(), l, mux) }()
+
+	err = Post(context.Background(), Client(path), "http://x/no", struct{}{}, &struct{}{})
+	var he *HTTPError
+	if !errors.As(err, &he) || he.Status != http.StatusForbidden {
+		t.Fatalf("err = %v (%T), want an HTTPError with status 403", err, err)
+	}
+	if err.Error() != "refused: bad name" {
+		t.Errorf("Error() = %q, want the reply text unchanged", err.Error())
 	}
 }

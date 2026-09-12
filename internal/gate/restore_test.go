@@ -233,7 +233,7 @@ func TestRollbackRetryAfterDataRestored(t *testing.T) {
 	t.Run("without --with-data: refused, nothing changed", func(t *testing.T) {
 		f, g := restoredFake(t)
 		_, err := g.Rollback(context.Background(), "app", false)
-		if !isRefused(err) || !strings.Contains(err.Error(), "rollback app --with-data` again") {
+		if !IsRefused(err) || !strings.Contains(err.Error(), "rollback app --with-data` again") {
 			t.Fatalf("want a refusal that says to use --with-data, got %v", err)
 		}
 		for _, c := range f.calls {
@@ -279,7 +279,7 @@ func TestUpdateRefusesRestoredData(t *testing.T) {
 	g := f.gate(t)
 	setEntry(t, g, "app", state.Entry{Prev: "bosun/prev/app:abc", DataRestored: true})
 	_, err := g.Update(context.Background(), "app", "sha256:d2", "")
-	if !isRefused(err) || !strings.Contains(err.Error(), "rollback app --with-data") {
+	if !IsRefused(err) || !strings.Contains(err.Error(), "rollback app --with-data") {
 		t.Fatalf("want a refusal, got %v", err)
 	}
 	if f.called("POST /images/create") {

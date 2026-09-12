@@ -88,8 +88,7 @@ objects with fixed fields. Unknown fields are refused.
 | `events()` | Returns and clears queued events, such as the result of a crash recovery. |
 | `skipClear(name)` | Removes a container's versions from the skip list. Only for the control server link (see "Control server link"). |
 
-With the control server link, the `list()` reply also gives the Docker host name, and
-the `update` reply also gives a `steps` list.
+With the control server link, the `update` reply also gives a `steps` list.
 
 The gate has no network, so it cannot send notes. Results come back to the updater in
 the `update` reply. Events that happen when no call is open (crash recovery on gate
@@ -330,8 +329,8 @@ stopped), `version.available` (notify mode), `gate.refused`, `registry.failing`,
 `recovery`, `warning`, `command.result`.
 
 - `id` is new for each event. The server uses it to drop repeats.
-- `host` comes from the gate's `list()` reply. The gate reads it once from Docker's
-  host name. `BOSUN_HOST` overrides it.
+- `host` comes from the gate. The gate reads Docker's host name once and puts it in
+  the updater's env. `BOSUN_HOST` on the gate overrides it.
 - `steps` come from the gate. The `update` reply gets a `steps` list with name, status,
   time and a short detail for each step of the update sequence.
 - `command_id` is set when a command caused the event.

@@ -28,7 +28,7 @@ func TestUpdaterBodyIsLockedDown(t *testing.T) {
 		{Type: "volume", Name: "bosun-state", Destination: "/var/lib/bosun"},
 		{Type: "volume", Name: "bosun-backups", Destination: "/var/lib/bosun-backups"},
 	}
-	b, _ := json.Marshal(updaterBody(self, "/run/bosun"))
+	b, _ := json.Marshal(updaterBody(self, "/run/bosun", ""))
 	s := string(b)
 
 	if strings.Contains(s, "docker.sock") {
@@ -403,5 +403,23 @@ func TestRecoverKeptRollbackClearsDataRestored(t *testing.T) {
 	}
 	if e := st.Entry("app"); e.DataRestored {
 		t.Errorf("entry = %+v, want DataRestored cleared after a kept rollback", e)
+	}
+}
+
+func TestUpdaterBodyCarriesTheHost(t *testing.T) {
+	self := &docker.Container{Image: "sha256:img"}
+	b, _ := json.Marshal(updaterBody(self, "/run/bosun", "worker-1"))
+	if !strings.Contains(string(b), `"BOSUN_HOST=worker-1"`) {
+		t.Errorf("updater body lacks the host: %s", b)
+	}
+}
+
+func TestUpdaterBodyKeepsTheUsersHost(t *testing.T) {
+	self := &docker.Container{Image: "sha256:img"}
+	self.Config.Env = []string{"BOSUN_HOST=mine"}
+	b, _ := json.Marshal(updaterBody(self, "/run/bosun", ""))
+	s := string(b)
+	if !strings.Contains(s, `"BOSUN_HOST=mine"`) || strings.Count(s, "BOSUN_HOST=") != 1 {
+		t.Errorf("want the user's host once and only once: %s", s)
 	}
 }
