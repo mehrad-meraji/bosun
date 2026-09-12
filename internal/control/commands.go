@@ -77,11 +77,12 @@ func (c *Client) Commands(ctx context.Context) ([]Command, []Refusal, error) {
 }
 
 // parse reads the command list. Unknown fields and unknown commands are
-// refused, never guessed at.
+// refused, never guessed at. Each item is decoded on its own: one bad item
+// is refused by its id, and the rest of the reply still runs. A whole-list
+// problem (junk, not a list, two lists, over the cap) takes everything.
 func parse(b []byte) ([]Command, []Refusal, error) {
 	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
-	var list []Command
+	var list []json.RawMessage
 	if err := dec.Decode(&list); err != nil {
 		return nil, nil, fmt.Errorf("bad command list: %w", err)
 	}
@@ -93,7 +94,19 @@ func parse(b []byte) ([]Command, []Refusal, error) {
 	}
 	var cmds []Command
 	var refs []Refusal
-	for _, cmd := range list {
+	for _, raw := range list {
+		cmd, err := parseOne(raw)
+		if err != nil {
+			// A field Bosun does not know: refuse this one item, so a server
+			// that adds an optional field does not brick the whole reply.
+			id := looseID(raw)
+			if !idRE.MatchString(id) {
+				log.Printf("control server: dropped a command that did not parse and has no usable id")
+				continue
+			}
+			refs = append(refs, Refusal{ID: id, Reason: clip(err.Error())})
+			continue
+		}
 		if !idRE.MatchString(cmd.ID) {
 			// Without a usable id there is nothing to report it against.
 			log.Printf("control server: dropped a command with a bad id")
@@ -109,10 +122,47 @@ func parse(b []byte) ([]Command, []Refusal, error) {
 		case cmd.Type == CmdSkipClear:
 			refs = append(refs, Refusal{ID: cmd.ID, Reason: "skip_clear needs a container name"})
 		default:
-			refs = append(refs, Refusal{ID: cmd.ID, Reason: fmt.Sprintf("unknown command %q", cmd.Type)})
+			// The type is the server's bytes; echo only a little of it.
+			refs = append(refs, Refusal{ID: cmd.ID, Reason: fmt.Sprintf("unknown command %q", clip(cmd.Type))})
 		}
 	}
 	return cmds, refs, nil
+}
+
+// parseOne decodes one item of the list, strictly: a field Bosun does not
+// know is an error, never a guess.
+func parseOne(raw []byte) (Command, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var cmd Command
+	if err := dec.Decode(&cmd); err != nil {
+		return Command{}, err
+	}
+	return cmd, nil
+}
+
+// looseID reads just the id of an item that failed the strict decode, so the
+// failure can be reported against it. "" when there is none to read.
+func looseID(raw []byte) string {
+	var only struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &only); err != nil {
+		return ""
+	}
+	return only.ID
+}
+
+// maxEcho is how many of the server's own bytes a refusal may repeat. A
+// reply can be 64 KB; a reason is read by a person.
+const maxEcho = 64
+
+// clip shortens text that came from the server.
+func clip(s string) string {
+	if len(s) <= maxEcho {
+		return s
+	}
+	return s[:maxEcho] + "..."
 }
 
 // fresh drops commands already run in the last 24 hours.

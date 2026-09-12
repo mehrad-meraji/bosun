@@ -22,7 +22,10 @@ func TestParseCommands(t *testing.T) {
 		{name: "both commands", body: `[{"id":"a","type":"check"},{"id":"b","type":"skip_clear","container":"nginx"}]`, wantOK: []string{"a", "b"}},
 		{name: "empty list", body: `[]`},
 		{name: "unknown command", body: `[{"id":"a","type":"reboot"}]`, wantRefuse: []string{"a"}},
-		{name: "unknown field", body: `[{"id":"a","type":"check","image":"evil"}]`, wantErr: true},
+		{name: "unknown field", body: `[{"id":"a","type":"check","image":"evil"}]`, wantRefuse: []string{"a"}},
+		{name: "unknown field in one item only", body: `[{"id":"a","type":"check"},{"id":"b","type":"check","image":"evil"}]`, wantOK: []string{"a"}, wantRefuse: []string{"b"}},
+		{name: "a bad item with no id", body: `[{"type":"check","image":"evil"}]`},
+		{name: "a bad item that is not an object", body: `[{"id":"a","type":"check"},5]`, wantOK: []string{"a"}},
 		{name: "skip_clear without a container", body: `[{"id":"a","type":"skip_clear"}]`, wantRefuse: []string{"a"}},
 		{name: "skip_clear with a bad container", body: `[{"id":"a","type":"skip_clear","container":"../etc"}]`, wantRefuse: []string{"a"}},
 		{name: "check with a container", body: `[{"id":"a","type":"check","container":"nginx"}]`, wantRefuse: []string{"a"}},
@@ -56,6 +59,33 @@ func TestParseCommands(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A field Bosun does not know must cost that one command, not the reply,
+// and the refusal must say what was wrong with it.
+func TestParseRefusesOneBadItemByName(t *testing.T) {
+	cmds, refs, err := parse([]byte(`[{"id":"a","type":"check"},{"id":"b","type":"check","image":"evil"}]`))
+	if err != nil {
+		t.Fatalf("err = %v, want the good item kept", err)
+	}
+	if len(cmds) != 1 || cmds[0].ID != "a" || len(refs) != 1 || refs[0].ID != "b" {
+		t.Fatalf("kept = %+v, refused = %+v, want a kept and b refused", cmds, refs)
+	}
+	if !strings.Contains(refs[0].Reason, "image") {
+		t.Errorf("reason = %q, want the field named", refs[0].Reason)
+	}
+}
+
+// The reason must never repeat a whole reply back at the user.
+func TestParseClipsWhatItEchoes(t *testing.T) {
+	long := strings.Repeat("x", 5000)
+	_, refs, err := parse([]byte(`[{"id":"a","type":"` + long + `"}]`))
+	if err != nil || len(refs) != 1 {
+		t.Fatalf("parse = %v, %v, want one refusal", refs, err)
+	}
+	if len(refs[0].Reason) > maxEcho+64 {
+		t.Errorf("reason is %d bytes long: %q", len(refs[0].Reason), refs[0].Reason)
 	}
 }
 
@@ -134,6 +164,7 @@ func FuzzParse(f *testing.F) {
 	f.Add([]byte(`[{"id":"a","type":"skip_clear","container":"nginx"}]`))
 	f.Add([]byte(`[{"id":"a","type":"skip_clear","container":"../../etc/passwd"}]`))
 	f.Add([]byte(`[]`))
+	f.Add([]byte(`[{"id":"a","type":"check"},{"id":"b","type":"check","image":"evil"}]`))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		cmds, refs, err := parse(b)
 		if err != nil {
