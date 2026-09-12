@@ -446,7 +446,7 @@ Every error says what to do next. For example: "No old version kept for nginx. R
 | Gate refuses a request | Log loudly. Note. |
 | Note fails | Log only. |
 | Second round while one runs | Refused with "a round is running, try again later". |
-| Control server down | Events: 3 tries, then dropped and logged. Commands: try again at the next poll. Updates go on. |
+| Control server down | Events: four tries, then dropped and logged. Commands: try again at the next poll. Updates go on. |
 | Bad command from the control server | Refused, logged, and a `command.result` event with `refused`. |
 
 ## Testing
