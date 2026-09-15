@@ -2,7 +2,8 @@
 # Set DOCKER_GID first (see README).
 services:
   bosun:
-    build: .
+    image: ghcr.io/mehrad-meraji/bosun:v0.1.0 # pin a version; change it to upgrade
+    build: . # used if the pull fails, or with "docker compose up --build"
     container_name: bosun-gate
     restart: unless-stopped
     stop_grace_period: 3m # let a running update finish

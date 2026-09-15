@@ -20,11 +20,14 @@ container's image. Even if the network part is hacked, it cannot take over your 
    export DOCKER_GID=$(docker run --rm -v /var/run/docker.sock:/s busybox stat -c %g /s)
    ```
 
-2. Start Bosun:
+2. Get `compose.yml` and start Bosun. It pulls the image from `ghcr.io/mehrad-meraji/bosun`:
 
    ```bash
-   docker compose up -d --build
+   curl -fsSLO https://raw.githubusercontent.com/mehrad-meraji/bosun/main/compose.yml
+   docker compose up -d
    ```
+
+   To build from source, clone the repo and run `docker compose up -d --build`.
 
    You will see two containers. `bosun-gate` is yours. `bosun-updater` is made by the
    gate, and the gate removes it when it stops.
@@ -33,6 +36,9 @@ container's image. Even if the network part is hacked, it cannot take over your 
 
 Bosun keeps its state (skip list, rollback records) in the `bosun-state` volume, which
 only the gate can reach.
+
+To upgrade, change the version in `image:` in `compose.yml`, then run `docker compose up -d`.
+Bosun does not update itself.
 
 Do not set `hostname` or `user` on the gate. It finds its own container by hostname.
 
