@@ -1,4 +1,4 @@
-// Package control talks to an optional control server, for example Sentinel.
+// Package control talks to an optional control server that the user runs.
 // It sends events and reads a short list of commands. Only the updater uses
 // it: the gate has no network and opens no port, so the server can never
 // connect to Bosun.

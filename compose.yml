@@ -14,7 +14,7 @@ services:
     environment:
       BOSUN_SCHEDULE: "0 4 * * *"
       # Optional control server link. See README, "Control server link".
-      # BOSUN_CONTROL_URL: https://sentinel.example.com/api/bosun
+      # BOSUN_CONTROL_URL: https://control.example.com/api/bosun
       # BOSUN_CONTROL_COMMANDS: "true"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

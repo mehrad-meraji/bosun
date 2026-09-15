@@ -119,7 +119,7 @@ docker exec -it bosun-gate bosun help rollback
 
 ## Control server link (optional)
 
-Bosun can report to a control server, for example Sentinel, and take two
+Bosun can report to a control server that you run, and take two
 commands from it. It is off until you set `BOSUN_CONTROL_URL`.
 
 The gate still has no network and opens no port. The updater sends the
@@ -127,7 +127,7 @@ events and asks for the commands. The server never connects to Bosun.
 
 ```yaml
     environment:
-      BOSUN_CONTROL_URL: https://sentinel.example.com/api/bosun
+      BOSUN_CONTROL_URL: https://control.example.com/api/bosun
       BOSUN_CONTROL_COMMANDS: "true"
     volumes:
       - ./control-token:/etc/bosun/control-token:ro
@@ -180,3 +180,7 @@ out are lost; the next round still works.
 - If the Docker daemon restarts in the middle of an update, a container with
   `restart: always` can start twice (old and new) until Bosun recovers. Prefer
   `restart: unless-stopped`.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
