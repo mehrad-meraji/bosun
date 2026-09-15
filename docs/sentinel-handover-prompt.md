@@ -6,13 +6,13 @@ Paste everything below the line to the agent working on Sentinel.
 
 Build the Sentinel side of the Bosun link.
 
-**Bosun** is a Docker container updater (a safer Watchtower) at `/Users/mehrad/Projects/bosun`.
+**Bosun** is a Docker container updater (a safer Watchtower) at <https://github.com/mehrad-meraji/bosun>.
 It is finished and shipped on `main`. It can already talk to a control server; Sentinel is
 that server, and its half does not exist yet. Your job is the Sentinel half: the two HTTP
 endpoints, the storage, and the UI.
 
-Read Bosun's design at `/Users/mehrad/Projects/bosun/docs/superpowers/specs/2026-09-11-bosun-design.md`,
-section "Control server link", and the code in `/Users/mehrad/Projects/bosun/internal/control/`.
+Read Bosun's design at `docs/superpowers/specs/2026-09-11-bosun-design.md`,
+section "Control server link", and the code in `internal/control/`.
 That code is the contract. Where this prompt and the code disagree, the code wins — say so
 rather than guessing.
 
