@@ -13,3 +13,13 @@ jobs:
       - run: go test -run '^$' -fuzz FuzzUpdateRequest -fuzztime 30s ./internal/gate
       - run: go test -tags integration -count=1 ./...
       - run: docker build -t bosun:ci .
+
+  # Bosun as a user runs it: the compose service on real Linux Docker Engine,
+  # end to end. The Go tests drive the gate from outside; this runs it inside
+  # its container. The same script runs on a Mac with Docker Desktop.
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - run: scripts/deploy-test.sh

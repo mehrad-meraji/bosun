@@ -51,7 +51,9 @@ One image, one Go binary (`bosun`). You add **one service** to compose: the gate
 - Mounts `/var/run/docker.sock`. Nothing else does.
 - Runs as a non-root user. It joins only the host's `docker` group through
   `group_add: ["${DOCKER_GID}"]`. The README gives the one-liner to find it:
-  `stat -c %g /var/run/docker.sock`.
+  `docker run --rm -v /var/run/docker.sock:/s busybox stat -c %g /s`. It asks from inside
+  a container because on a Mac the host's own number is wrong: Docker Desktop's socket
+  belongs to a different group inside its Linux machine.
 - `network_mode: none`.
 - Listens on a unix socket in a shared named volume: `/run/bosun/gate.sock`.
 - Hardened: read-only root file system, `cap_drop: [ALL]`,
@@ -503,3 +505,12 @@ Every error says what to do next. For example: "No old version kept for nginx. R
 - A rollback button in notes (needs an open port). The control server link can clear
   the skip list and start a round, but it cannot roll back.
 - Rootless Docker and Podman. Podman users have `podman auto-update`.
+- Apple's `container` tool. It runs OCI images but has no Docker API, socket or Compose,
+  so Bosun has nothing to talk to.
+
+## Where it runs
+
+Linux with Docker Engine, and a Mac with Docker Desktop. On a Mac, Bosun runs as a normal
+Linux container inside Docker Desktop's Linux machine and never touches macOS itself, so
+there is no Mac-specific code. `scripts/deploy-test.sh` checks a host end to end, as a user
+runs Bosun; CI runs it on Linux.

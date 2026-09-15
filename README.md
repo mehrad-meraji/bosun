@@ -10,6 +10,7 @@ container's image. Even if the network part is hacked, it cannot take over your 
 - Rolls back by itself when a new version is not healthy.
 - Manual rollback with one command.
 - Notes to Slack, Teams, Discord, ntfy, email and more (Shoutrrr URLs).
+- Runs on Linux with Docker Engine, and on a Mac with Docker Desktop.
 
 ## Install
 
@@ -34,6 +35,20 @@ Bosun keeps its state (skip list, rollback records) in the `bosun-state` volume,
 only the gate can reach.
 
 Do not set `hostname` or `user` on the gate. It finds its own container by hostname.
+
+## Where it runs
+
+| Host | Works | Tested by |
+|---|---|---|
+| Linux, Docker Engine | yes | `scripts/deploy-test.sh` in CI, on every push |
+| Mac, Docker Desktop | yes | `scripts/deploy-test.sh`, run by hand |
+| Podman | not supported yet | Podman has its own `podman auto-update` |
+| Rootless Docker | not supported | the gate needs the normal Docker socket |
+| Apple's `container` tool | cannot work | it has no Docker API, which Bosun talks to |
+
+To check your own host, run `scripts/deploy-test.sh`. It starts Bosun, updates a test
+app, takes a backup, restores it, rolls back a broken version, and removes everything
+it made. It needs port 5066 free.
 
 ## Watch a container
 
